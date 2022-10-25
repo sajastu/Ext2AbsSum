@@ -1,0 +1,7 @@
+
+This is the two-step summarization system with topical information.
+Section embeddings are used to score sections for estimating how many tokens should be sampled from each section.
+Sentence embeddings are passed to the section encoder.
+encoder_sent_attn is added after encoder_attn in decoder.
+LIMIT = 2048, INPUT_SIZE=6144
+

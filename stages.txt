@@ -1,0 +1,4 @@
+
+First preprocess through my code from single_tokenized/ and save it under single_tokenized_my_prep/
+Then run the seq sentence classification.
+Then preprocess the sets based on label "4", and save it under single_tokenized_final/

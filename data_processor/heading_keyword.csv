@@ -1,0 +1,334 @@
+intro,related work,experiments,results,conclusion
+introduction,related work,experiments,discussion,conclusion
+introduction and motivation,background,evaluation,results,conclusions
+motivation,related works,experimental results,analysis,conclusion and future work
+motivations,previous work,experimental setup,experiments and results,conclusions and future work
+basics and motivations,background and related work,experiment,results and discussion,conclusion & future work
+introduction,overview,data,discussion and conclusion,extensions
+introduction and motivation,notation and preliminaries,experimental evaluation,discussion and future work,future work
+motivation,background and notation,dataset,empirical results,related work and discussion
+motivations,other related work,implementation,main results,discussion and related work
+basics and motivations,prior work,numerical experiments,results and analysis,conclusion and future directions
+introduction,background and preliminaries,training,theoretical results,summary and future work
+motivation,background and motivation,datasets,theoretical analysis,limitations and future work
+introduction and background,background & related work,experimental settings,conclusion and discussion,future directions
+introduction and literature review,background and related works,implementation details,simulations,conclusion and outlook
+introduction and motivation,further related work,data collection,concluding remarks,conclusions and future directions
+introduction and related work,related and future work,empirical evaluation,convergence analysis,conclusions and discussion
+research model and hypotheses,preliminaries and related work,inference,qualitative analysis,discussion and future directions
+research questions,notation and background,experimental design,error analysis,conclusions and discussions
+hypothesis development,additional related work,experiments and evaluation,discussions,conclusion and future direction
+basic definitions,related research,experiment setup,empirical study,conclusions and future research
+1. introduction,notations and background,metrics,experiments and analysis,conclusion and future works
+introduction and related works,related work and conclusion,features,discussion and conclusions,future plans
+introduction and problem description,background: graph neural networks,datasets and experimental setup,proofs,conclusion
+motivation and contribution,,experiments and discussion,numerical results,conclusions
+introduction and overview,,experimentation,analysis and discussion,conclusion and future work
+,,baseline models,lower bound,conclusions and future work
+,,assumptions,empirical studies,conclusion & future work
+,,experiment settings,experiment results,extensions
+,,learning and inference,model analysis,future work
+,,evaluation metrics,corpus analysis,related work and discussion
+,,the wikimovies benchmark,data analysis,discussion and related work
+,,experimental setting,summary and discussion,conclusion and future directions
+,,additional experiments,synthetic experiments,summary and future work
+,,experiment details,main result,limitations and future work
+,,dataset and annotation,discussion & future work,future directions
+,,experimental study,experimental results and discussion,conclusion and outlook
+,,experiments and evaluations,performance evaluation,conclusions and future directions
+,,baseline,evaluation results,conclusions and discussion
+,,synthetic data experiments,critical point analysis,discussion and future directions
+,,design and implementation,complexity analysis,conclusions and discussions
+,,experiments,simulation study,conclusion and future direction
+,,evaluation,regret analysis,conclusions and future research
+,,experimental results,analyses,conclusion and future works
+,,experimental setup,simulation,future plans
+,,experiment,evaluation and results,summary.
+,,data,empirical comparisons,closing remarks
+,,experimental evaluation,comparison with other methods,
+,,dataset,evaluations,final remarks
+,,,generalization experiments,extensions and future work
+,,numerical experiments,results and discussions,conclusion and future works
+,,training,automatic evaluation,remarks
+,,datasets,human evaluation,conclusions
+,,experimental settings,evaluation and discussion,conclusion
+,,implementation details,discussion & conclusion,conclusions and future work
+,,data collection,analysis of rsp,concluding remarks
+,,empirical evaluation,results analysis,conclusion and future work:
+,,inference,discussion,discussion and conclusion
+,,experimental design,results,summary
+,,experiments and evaluation,analysis,summary and conclusions
+,,experiment setup,experiments and results,conclusions and future research
+,,metrics,results and discussion,future work
+,,features,discussion and conclusion,conclusions and future works
+,,datasets and experimental setup,discussion and future work,conclusion and discussion
+,,experiments and discussion,empirical results,conclusion and future works
+,,experimentation,main results,conclusions and discussion
+,,baseline models,results and analysis,conclusions and further work
+,,assumptions,theoretical results,conclusion and outlook
+,,experiment settings,theoretical analysis,final remarks
+,,learning and inference,conclusion and discussion,discussion and future work
+,,evaluation metrics,simulations,summary and conclusion
+,,the wikimovies benchmark,concluding remarks,conclusions and further research
+,,experimental setting,convergence analysis,conclusion and future research
+,,additional experiments,qualitative analysis,conclusions and future directions:
+,,experiment details,error analysis,conclusion and perspectives
+,,dataset and annotation,discussions,conclusions and outlook
+,,experimental study,empirical study,conclusion and further research
+,,experiments and evaluations,experiments and analysis,conclusions and perspectives
+,,baseline,discussion and conclusions,conclusions and recommendations
+,,synthetic data experiments,proofs,conclusion and further work
+,,design and implementation,numerical results,conclusions and future research directions
+,,,analysis and discussion,conclusion and future directions
+,,,lower bound,limitations and future work
+,,,empirical studies,future directions
+,,,experiment results,limitations
+,,,model analysis,discussion and concluding remarks
+,,,corpus analysis,conclusion and future research directions
+,,,data analysis,concluding remarks and future work
+,,,summary and discussion,conclusion and future scope
+,,Learning and Inference.,synthetic experiments,summary and concluding remarks
+,,,main result,recommendations
+,,,discussion & future work,conclusion and further study
+,,Practice. ,experimental results and discussion,summary and outlook
+,,,performance evaluation,conclusions and extensions
+,,,evaluation results,conclusion and recommendation
+,,Experimentation. ,critical point analysis,concluding remarks and future research
+,,,complexity analysis,outlook
+,,Clustering and Evaluation Methods.,simulation study,concluding remarks and future works
+,,,regret analysis,conclusions and future scope
+,,discussion.,analyses,future research
+,,,simulation,future research directions
+,,,evaluation and results,conclusions and implications
+,,,empirical comparisons,future plans
+,,results,comparison with other methods,conclusions and further study
+,,discussion,evaluations,conclusion and implications
+,,results and discussion,generalization experiments,concluding remark
+,,experimental results,results and discussions,conclusions and directions for future research
+,,computational results,automatic evaluation,limitations and future research
+,,experiments and results,human evaluation,limitations and conclusions
+,,discussion and conclusions,evaluation and discussion,limitations and further research
+,,evaluation,discussion & conclusion,conclusions and managerial implications
+,,simulation results,analysis of rsp,conclusion and limitations
+,,results and discussions,results analysis,conclusion & future work
+,,experimental results and discussion,efficiency.,conclusions and suggestions
+,,experimental evaluation,experiments.,conclusions and directions for further research
+,,discussions,,6. summary
+,,performance evaluation,evaluation.,conclusions and future perspectives
+,,results and analysis,"past, present, future applications.",summary and discussions
+,,experimental results and analysis,"0.834 	336",summary and future research
+,,,54.3,conclusions and future developments
+,,performance analysis,62.2,limitations and future directions
+,,analysis,54.8,strengths and limitations
+,,experimental results and discussions,58,conclusion and prospects
+,,numerical analysis,"Past, Present, Future Applications.",limitations and recommendations
+,,experimental analysis,Performance on Shared Task.,summary of results
+,,result and discussion,0.827,conclusions and future researches
+,,experiments and discussion,Experiment. ,conclusion and ongoing work
+,,general discussion,Discussion and Related works. ,conclusions and future plans
+,,simulation results and discussion,"Those words that have the semantic classes �Parent�,. ",concluding comments
+,,security analysis,Adapting the robust  approach for other. ,discussion and outlook
+,,empirical results,experiment and evaluation,conclusion and suggestions
+,,sensitivity analysis,,conclusions and summary
+,,data analysis,,conclusion and remarks
+,,conclusions and discussions,,conclusions and final remarks
+,,empirical analysis,,closing remarks
+,,discussions and conclusions,,final discussion and conclusions
+,,findings,,conclusive remarks
+,,experiment results,,remarks
+,,numerical results and discussion,,concluding discussion
+,,simulation and results,,conclusions and suggestions for further research
+,,empirical evaluation,,future works
+,,result,,related and future work
+,,discussion and implications,,conclusion and future researches
+,,analysis and results,,conclusion and limitation
+,,research background,,conclusion and extensions
+,,experimental setup and results,,discussion and future research
+,,simulations and results,,remarks and conclusions
+,,simulation results and discussions,,future work and conclusions
+,,computational analysis,,conclusions and limitations
+,,data analysis and results,,limitations and directions for future research
+,,experimental result,,conclusion and future work
+,,comparison,,concluding summary
+,,computational tests,,looking further
+,,discussion of results,,overall conclusions
+,,discussions and conclusion,,summary and future work
+,,simulation results and analysis,,conclusions and discussions
+,,main results,,limitation of research and opportunities for future research
+,,experiments and discussions,,summary and future work
+,,error analysis,,concluding remark and future work
+,,experiment and analysis,,concluding remarks and future research directions
+,,experiments and evaluation,,summary and future research directions
+,,computational complexity,,limitations and avenues for future research
+,,statistical analysis,,summary and implications
+,,experimental results and comparison,,limitations of the current ggcmi data and future research
+,,application and results,,"summary, managerial insights and extensions"
+,,performance comparison,,opportunities for future research�what can we expect in the next decade?
+,,experiment and results,,summary and outlook on research perspectives
+,,model analysis,,future discussion
+,,results and evaluation,,
+,,experiment results and analysis,,final comments
+,,stability analysis,,
+,,summary and discussion,,
+,,analysis and discussion,,future trends
+,,complexity analysis,,
+,,performance,,
+,,comparative analysis,,
+,,evaluation and analysis,,
+,,discussion and limitations,,
+,,simulation and experimental results,,
+,,convergence analysis,,
+,,use cases,,
+,,evaluation and discussion,,
+,,numerical examples and discussions,,
+,,equilibrium analysis,,
+,,system evaluation,,
+,,experimentation and results,,
+,,numerical illustrations,,
+,,analysis results,,
+,,numerical results and discussions,,
+,,analysis of results,,
+,,theoretical analysis,,
+,,general discussion and conclusions,,
+,,results and comparisons,,
+,,conclusion and implications,,
+,,performance results,,
+,,computational complexity analysis,,
+,,discussion of the results,,
+,,case study and results,,
+,,empirical evidence,,
+,,results and conclusions,,
+,,discussion of experimental results,,
+,,finite element analysis,,
+,,further discussion,,limitations
+,,findings and discussion,,
+,,computational results and comparisons,,
+,,evaluation results,,
+,,performance evaluations,,
+,,experimental results and comparisons,,
+,,comparisons,,extensions
+,,applications and results,,
+,,modeling results and discussion,,
+,,experiments and comparisons,,
+,,results and validation,,
+,,evaluation and results,,
+,,numerical experiments and discussion,,
+,,numerical experiments and results,,
+,,application and evaluation,,
+,,results & discussions,,
+,,an empirical application,,
+,,analysis of the results,,
+,,experimental examples,,
+,,implementation results and discussion,,
+,,numerical simulations and results,,
+,,numerical testing,,
+,,numerical case study,,
+,,optimization results,,
+,,experimental results and analyses,,
+,,practical implications,,
+,,the main results,,
+,,simulation example,,
+,,case analysis,,
+,,illustration,,
+,,test results,,
+,,experimental investigations,,
+,,data and results,,
+,,performance analysis and discussion,,
+,,main result,,
+,,numerical test,,
+,,experimental results and validation,,
+,,discussion on the proposed method and research challenges,,
+,,implementation results,,
+,,estimation results,,
+,,comparison and discussion,,
+,,simulation and performance evaluation,,
+,,comparative evaluation,,
+,,numerical analysis and results,,
+,,experiment results and discussions,,
+,,analysis and discussions,,
+,,principal component analysis (pca),,
+,,computational experiments and discussion,,
+,,the steady-state analysis,,
+,,illustrative numerical examples,,
+,,discussion and perspectives,,
+,,discussion and perspectives,,
+,,tests and results,,
+,,isogeometric analysis,,
+,,results and conclusion,,
+,,experiment and discussion,,
+,,case studies and results,,
+,,simulation and analysis,,
+,,experimental work and results,,
+,,lessons learnt,,
+,,simulations and discussion,,
+,,system analysis,,
+,,discussion & conclusion,,
+,,experimental result and discussion,,
+,,sensitivity analysis and discussion,,
+,,system testing and evaluation,,
+,,dataset analysis,,
+,,experimental results and performance evaluation,,
+,,numerical examples and simulation results,,
+,,an illustrative empirical application,,
+,,computational results and discussion,,
+,,numerical example and discussions,,
+,,experiment results and discussion,,
+,,requirements analysis,,
+,,results of the case study,,
+,,discussions and limitations,,
+,,experimentation and analysis of results,,
+,,policy comparison,,
+,,comparison with other findings,,
+,,result analysis,,
+,,discussion of the experimental results,,
+,,computational results and analysis,,
+,,robustness test,,
+,,case study and experiments,,
+,,discussion and comparison with existing works,,
+,,measurement results,,
+,,discussion and results,,
+,,the empirical study,,
+,,empirical study and discussions,,
+,,discussion and summary,,
+,,experiment results and analyses,,
+,,results and findings,,
+,,results and performance analysis,,
+,,empirical results and analysis,,
+,,numerical result,,
+,,analytical results,,
+,,conclusion and discussions,,
+,,experiment and results analysis,,
+,,empirical findings,,
+,,comparison with other findings,,
+,,empirical experiment,,
+,,data collection and analysis,,
+,,model evaluation,,
+,,experimental investigation,,
+,,managerial implications,,
+,,numerical investigation,,
+,,numerical tests,,
+,,numerical applications,,
+,,empirical application,,
+,,numerical simulations,,
+,,numerical results,,
+,,numerical experiments,,
+,,application,,
+,,simulation study,,
+,,experimental design,,
+,,experimentation,,
+,,datasets,,
+,,implementation details,,
+,,research design,,
+,,data collection,,
+,,dataset,,
+,,experimental set-up,,
+,,experimental settings,,
+,,experimental setting,,
+,,preprocessing,,
+,,experimental data,,
+,,experiment design,,
+,,corpus,,
+,,data set,,
+,,evaluation criteria,,
+,,data preprocessing,,
+,,databases,,
