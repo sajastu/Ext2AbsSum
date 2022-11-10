@@ -101,6 +101,7 @@ def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start
     """
     Shift input ids one token to the right.
     """
+
     shifted_input_ids = input_ids.new_zeros(input_ids.shape)
     try:
         shifted_input_ids[:, 1:] = input_ids[:, :-1].clone()
@@ -115,6 +116,18 @@ def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start
 
     return shifted_input_ids
 
+def shift_tokens_right_2d(input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int, labels):
+    """
+    Shift input ids one token to the right.
+    """
+    shifted_input_ids = input_ids.new_zeros(input_ids.shape)
+    shifted_input_ids[:, :, 1:] = input_ids[:, :, :-1].clone()
+    shifted_input_ids[:, :, 0] = decoder_start_token_id
+    if pad_token_id is None:
+        raise ValueError("config.pad_token_id has to be defined.")
+    # replace possible -100 values in labels by `pad_token_id`
+    shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
+    return shifted_input_ids
 
 
 
@@ -134,6 +147,7 @@ class Seq2SeqLMOutput(ModelOutput):
     encoder_last_hidden_state: Optional[torch.FloatTensor] = None
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_last_hidden_states: torch.FloatTensor = None
 
 class LEDSeq2SeqModelOutput(ModelOutput):
 
@@ -151,393 +165,10 @@ class LEDSeq2SeqModelOutput(ModelOutput):
     encoder_global_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
-class LEDDecoderAttentionTopicAware(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(
-        self,
-        embed_dim: int,
-        topic_dim: int,
-        num_heads: int,
-        dropout: float = 0.0,
-        is_decoder: bool = False,
-        bias: bool = True,
-        k: int= 5,
-        init_k: int= 5,
-    ):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.topic_dim = topic_dim
-        self.num_heads = num_heads
-        self.dropout = dropout
-        self.head_dim = embed_dim // num_heads
-        if self.head_dim * num_heads != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {num_heads})."
-            )
-        self.scaling = self.head_dim**-0.5
-        self.is_decoder = is_decoder
-        self.init_k = init_k
-
-        self.k = None
-        if self.is_decoder:
-            self.k = k if k > init_k else None
-
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-
-        self.inc_topic = False
-        if k > init_k:
-            self.inc_topic = True
-            self.topic_k_proj = nn.Linear(topic_dim, embed_dim, bias=bias)
-            self.topic_v_proj = nn.Linear(topic_dim, embed_dim, bias=bias)
-            self.linear_topic_w = nn.Linear(self.num_heads * self.head_dim * 3, self.num_heads)
-
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        # self.topic_q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        key_value_states: Optional[torch.Tensor] = None,
-        key_value_states_topical: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        layer_head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        """Input shape: Batch x Time x Channel"""
-        # if not self.training:
-            # import pdb;pdb.set_trace()
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
-        is_cross_attention = key_value_states is not None
-        bsz, tgt_len, embed_dim = hidden_states.size()
-
-        # get query proj
-        query_states = self.q_proj(hidden_states) * self.scaling
-        # get key, value proj
-        if is_cross_attention and past_key_value is not None:
-            # reuse k,v, cross_attentions
-            key_states = past_key_value[0]
-            value_states = past_key_value[1]
-
-            if self.inc_topic:
-                key_states_topic = past_key_value[2]
-                value_states_topic = past_key_value[3]
-
-        elif is_cross_attention:
-            # cross_attentions
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
-
-            if self.inc_topic:
-                key_states_topic = self._shape(self.topic_k_proj(key_value_states_topical), -1, bsz)
-                value_states_topic = self._shape(self.topic_v_proj(key_value_states_topical), -1, bsz)
-
-
-        elif past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-            if self.inc_topic:
-                key_states_topic = self._shape(self.topic_k_proj(hidden_states), -1, bsz)
-                value_states_topic = self._shape(self.topic_v_proj(hidden_states), -1, bsz)
-                key_states_topic = torch.cat([past_key_value[2], key_states_topic], dim=2)
-                value_states_topic = torch.cat([past_key_value[3], value_states_topic], dim=2)
-
-        else:
-            # self_attention
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-
-
-        if self.is_decoder:
-            # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
-            # Further calls to cross_attention layer can then reuse all cross-attention
-            # key/value_states (first "if" case)
-            # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
-            # all previous decoder key/value_states. Further calls to uni-directional self-attention
-            # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
-            # if encoder bi-directional self-attention `past_key_value` is always `None`
-            if self.inc_topic:
-                past_key_value = (key_states, value_states, key_states_topic, value_states_topic)
-            else:
-                past_key_value = (key_states, value_states)
-
-
-        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
-
-        # query is the same for both token and topic...
-        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-
-        key_states = key_states.view(*proj_shape)
-        value_states = value_states.view(*proj_shape)
-
-        if self.inc_topic:
-            key_states_topic = key_states_topic.view(*proj_shape)
-            value_states_topic = value_states_topic.view(*proj_shape)
-
-        src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-
-        if self.inc_topic:
-            attn_weights_topic = torch.bmm(query_states, key_states_topic.transpose(1, 2))
-
-        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-            if self.inc_topic:
-                attn_weights_topic = attn_weights_topic.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
-                attn_weights_topic = attn_weights_topic.view(bsz * self.num_heads, tgt_len, src_len)
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-
-        if self.inc_topic:
-            attn_weights_topic = nn.functional.softmax(attn_weights_topic, dim=-1)
-
-        if layer_head_mask is not None:
-            if layer_head_mask.size() != (self.num_heads,):
-                raise ValueError(
-                    f"Head mask for a single layer should be of size {(self.num_heads,)}, but is"
-                    f" {layer_head_mask.size()}"
-                )
-            attn_weights = layer_head_mask.view(1, -1, 1, 1) * attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-            if self.inc_topic:
-                attn_weights_topic = layer_head_mask.view(1, -1, 1, 1) * attn_weights_topic.view(bsz, self.num_heads, tgt_len, src_len)
-                attn_weights_topic = attn_weights_topic.view(bsz * self.num_heads, tgt_len, src_len)
-
-        if output_attentions:
-            # this operation is a bit awkward, but it's required to
-            # make sure that attn_weights keeps its gradient.
-            # In order to do so, attn_weights have to be reshaped
-            # twice and have to be reused in the following
-            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
-
-            if self.inc_topic:
-                attn_weights_topic_reshaped = attn_weights_topic.view(bsz, self.num_heads, tgt_len, src_len)
-                attn_weights_topic = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
-
-
-        else:
-            attn_weights_reshaped = None
-
-        attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
-        if self.inc_topic:
-            attn_probs_topic = nn.functional.dropout(attn_weights_topic, p=self.dropout, training=self.training)
-
-        attn_output = torch.bmm(attn_probs, value_states)
-        if self.inc_topic:
-            attn_output_topic = torch.bmm(attn_probs_topic, value_states_topic)
-
-        # if attn_probs.size(0) == 32:
-        #     import pdb;pdb.set_trace()
-        # combine attention vectors...
-            p_vec = torch.cat([attn_output, attn_output_topic, query_states], -1).transpose(1, 2).contiguous().view(bsz, -1, self.num_heads * self.head_dim * 3)
-            topic_p = torch.sigmoid(self.linear_topic_w(p_vec).transpose(1, 2)).unsqueeze(-1)
-            try:
-                attn_probs = topic_p.reshape(bsz*self.num_heads, -1, 1) * attn_probs + (1 - topic_p).reshape(bsz*self.num_heads, -1, 1) * attn_probs_topic
-            except:
-                import pdb;pdb.set_trace()
-            # attn_probs_topic = nn.functional.dropout(attn_weights_topic, p=self.dropout, training=self.training)
-            try:
-                attn_output = torch.bmm(attn_probs, value_states)
-            except:
-                import pdb;pdb.set_trace()
-
-        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = (
-            attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
-            .transpose(1, 2)
-            .reshape(bsz, tgt_len, embed_dim)
-        )
-
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output, attn_weights_reshaped, past_key_value
-
-
-
-class LEDTopicDecoderAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(
-        self,
-        embed_dim: int,
-        topic_dim: int,
-        num_heads: int,
-        dropout: float = 0.0,
-        is_decoder: bool = False,
-        bias: bool = True,
-    ):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.dropout = dropout
-        self.head_dim = embed_dim // num_heads
-        if self.head_dim * num_heads != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {num_heads})."
-            )
-        self.scaling = self.head_dim**-0.5
-        self.is_decoder = is_decoder
-
-        self.k_proj = nn.Linear(topic_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(topic_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        key_value_states: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        layer_head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        """Input shape: Batch x Time x Channel"""
-
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
-        is_cross_attention = key_value_states is not None
-        bsz, tgt_len, embed_dim = hidden_states.size()
-
-        # get query proj
-        query_states = self.q_proj(hidden_states) * self.scaling
-        # get key, value proj
-        if is_cross_attention and past_key_value is not None:
-            # reuse k,v, cross_attentions
-            key_states = past_key_value[0]
-            value_states = past_key_value[1]
-        elif is_cross_attention:
-            # cross_attentions
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
-        elif past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-        else:
-            # self_attention
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-
-        if self.is_decoder:
-            # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
-            # Further calls to cross_attention layer can then reuse all cross-attention
-            # key/value_states (first "if" case)
-            # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
-            # all previous decoder key/value_states. Further calls to uni-directional self-attention
-            # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
-            # if encoder bi-directional self-attention `past_key_value` is always `None`
-            past_key_value = (key_states, value_states)
-
-        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
-        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-        key_states = key_states.view(*proj_shape)
-        value_states = value_states.view(*proj_shape)
-
-        src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-
-        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                # import pdb;pdb.set_trace()
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        if layer_head_mask is not None:
-            if layer_head_mask.size() != (self.num_heads,):
-                raise ValueError(
-                    f"Head mask for a single layer should be of size {(self.num_heads,)}, but is"
-                    f" {layer_head_mask.size()}"
-                )
-            attn_weights = layer_head_mask.view(1, -1, 1, 1) * attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
-        if output_attentions:
-            # this operation is a bit awkward, but it's required to
-            # make sure that attn_weights keeps its gradient.
-            # In order to do so, attn_weights have to be reshaped
-            # twice and have to be reused in the following
-            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
-        else:
-            attn_weights_reshaped = None
-
-        attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
-
-        attn_output = torch.bmm(attn_probs, value_states)
-
-        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = (
-            attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
-            .transpose(1, 2)
-            .reshape(bsz, tgt_len, embed_dim)
-        )
-
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output, attn_weights_reshaped, past_key_value
-
-
 class TGSumDecoderLayer(nn.Module):
-    def __init__(self, config: LEDConfig, use_topic=True, k=0, init_k=5):
+    def __init__(self, config: LEDConfig):
         super().__init__()
         self.embed_dim = config.d_model
-        self.use_topic = use_topic
-        self.k = k
-        self.init_k = init_k
 
         self.self_attn = LEDDecoderAttention(
             embed_dim=self.embed_dim,
@@ -567,23 +198,6 @@ class TGSumDecoderLayer(nn.Module):
             is_decoder=True,
         )
         self.encoder_attn_layer_norm_section = nn.LayerNorm(self.embed_dim)
-
-        # if self.use_topic:
-
-            # self.encoder_attn = LEDDecoderAttentionTopicAware(
-            #     self.embed_dim,
-            #     topic_dim=100,
-            #     num_heads=config.decoder_attention_heads,
-            #     dropout=config.attention_dropout,
-            #     is_decoder=True,
-            #     k=k,
-            #     init_k=init_k,
-            # )
-            # self.fc3 = nn.Linear(self.embed_dim * 2, self.embed_dim)
-
-
-
-        # self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.fc1 = nn.Linear(self.embed_dim, config.decoder_ffn_dim)
         self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
@@ -592,34 +206,15 @@ class TGSumDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        section_encoder_outputs: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
-        encoder_attention_mask_section: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         cross_attn_layer_head_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = True,
     ):
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape *(seq_len, batch, embed_dim)*
-            attention_mask (`torch.FloatTensor`): attention mask of size
-                *(batch, 1, tgt_len, src_len)* where padding elements are indicated by very large negative values.
-            encoder_hidden_states (`torch.FloatTensor`):
-                cross attention input to the layer of shape *(seq_len, batch, embed_dim)*
-            encoder_attention_mask (`torch.FloatTensor`): encoder attention mask of size
-                *(batch, 1, tgt_len, src_len)* where padding elements are indicated by very large negative values.
-            layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
-                *(decoder_attention_heads,)*.
-            cross_attn_layer_head_mask (`torch.FloatTensor`): mask for encoder attention heads in a given layer of
-                size *(decoder_attention_heads,)*.
-            past_key_value (`Tuple(torch.FloatTensor)`): cached past key and value projection states
-            output_attentions (`bool`): Whether the base model outputs attentions.
-                This requires the attentions tensor to be reshaped in this function.
-        """
         residual = hidden_states
 
         # Self-Attention
@@ -638,44 +233,41 @@ class TGSumDecoderLayer(nn.Module):
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
         # Cross-Attention Block
-
         if encoder_hidden_states is not None:
             residual = hidden_states
 
             cross_attn_past_key_value_word = past_key_value[2:4] if past_key_value is not None else None
-            cross_attn_past_key_value_section = past_key_value[4:] if past_key_value is not None else None
 
-            hidden_states, cross_attn_weights_section, cross_attn_present_key_value_section = \
-                self.encoder_attn_section(
-                    hidden_states=hidden_states,  # decoder query
-                    key_value_states=section_encoder_outputs.repeat(hidden_states.size(0), 1, 1) if self.training else section_encoder_outputs,
-                    attention_mask=encoder_attention_mask_section,
-                    layer_head_mask=cross_attn_layer_head_mask,
-                    past_key_value=cross_attn_past_key_value_section,
-                    output_attentions=output_attentions,
-                )
-            hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-            hidden_states = residual + hidden_states
-            hidden_states = self.encoder_attn_layer_norm_section(hidden_states)
+            try:
+                hidden_states, cross_attn_weights_word, cross_attn_present_key_value_word = \
+                    self.encoder_attn(
+                        hidden_states=hidden_states,  # decoder query
+                        # key_value_states=encoder_hidden_states.repeat(hidden_states.size(0), 1, 1) if self.training else encoder_hidden_states.unsqueeze(0).repeat(encoder_attention_mask.size(0), 1, 1),
+                        key_value_states=encoder_hidden_states.repeat(hidden_states.size(0), 1, 1) if self.training else encoder_hidden_states,
+                        attention_mask=encoder_attention_mask,
+                        layer_head_mask=cross_attn_layer_head_mask,
+                        past_key_value=cross_attn_past_key_value_word,
+                        output_attentions=output_attentions,
+                    )
+            except:
+                # try:
+                hidden_states, cross_attn_weights_word, cross_attn_present_key_value_word = \
+                    self.encoder_attn(
+                        hidden_states=hidden_states,  # decoder query
+                        # key_value_states=encoder_hidden_states.repeat(hidden_states.size(0), 1, 1) if self.training else encoder_hidden_states.unsqueeze(0).repeat(encoder_attention_mask.size(0), 1, 1),
+                        key_value_states=encoder_hidden_states,
+                        attention_mask=encoder_attention_mask,
+                        layer_head_mask=cross_attn_layer_head_mask,
+                        past_key_value=cross_attn_past_key_value_word,
+                        output_attentions=output_attentions,
+                    )
+                # except Exception as e:
+                #     import pdb;pdb.set_trace()
 
-            hidden_states, cross_attn_weights_word, cross_attn_present_key_value_word = \
-                self.encoder_attn(
-                    hidden_states=hidden_states,  # decoder query
-                    # key_value_states=encoder_hidden_states.repeat(hidden_states.size(0), 1, 1) if self.training else encoder_hidden_states.unsqueeze(0).repeat(encoder_attention_mask.size(0), 1, 1),
-                    key_value_states=encoder_hidden_states.repeat(hidden_states.size(0), 1, 1) if self.training else encoder_hidden_states,
-                    attention_mask=encoder_attention_mask,
-                    layer_head_mask=cross_attn_layer_head_mask,
-                    past_key_value=cross_attn_past_key_value_word,
-                    output_attentions=output_attentions,
-                )
             hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
             hidden_states = residual + hidden_states
             hidden_states = self.encoder_attn_layer_norm(hidden_states)
-
-
-
-            present_key_value = present_key_value + cross_attn_present_key_value_word + cross_attn_present_key_value_section
-            # present_key_value = present_key_value + cross_attn_present_key_value_word
+            present_key_value = present_key_value + cross_attn_present_key_value_word
 
         # Fully Connected
         residual = hidden_states
@@ -689,14 +281,12 @@ class TGSumDecoderLayer(nn.Module):
         outputs = (hidden_states,)
 
         if output_attentions:
-            outputs += (self_attn_weights, cross_attn_weights_word, cross_attn_weights_section)
+            outputs += (self_attn_weights, cross_attn_weights_word)
 
         if use_cache:
             outputs += (present_key_value,)
 
         return outputs
-
-
 
 
 class TGSumDecoder(LEDDecoder):
@@ -707,7 +297,7 @@ class TGSumDecoder(LEDDecoder):
         embed_tokens (nn.Embedding): output embedding
     """
 
-    def __init__(self, config: LEDConfig, embed_tokens: Optional[nn.Embedding] = None, use_topic=False):
+    def __init__(self, config: LEDConfig, embed_tokens: Optional[nn.Embedding] = None):
         super().__init__(config)
         self.dropout = config.dropout
         self.layerdrop = config.decoder_layerdrop
@@ -723,10 +313,11 @@ class TGSumDecoder(LEDDecoder):
             self.max_target_positions,
             config.d_model,
         )
-        self.layers = nn.ModuleList([TGSumDecoderLayer(config, use_topic=use_topic, k=idx) for idx in range(config.decoder_layers)])
+        self.layers = nn.ModuleList([TGSumDecoderLayer(config) for _ in range(config.decoder_layers)])
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
         self.gradient_checkpointing = False
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -846,9 +437,8 @@ class TGSumDecoder(LEDDecoder):
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
         if input_shape[-1] > 1:
-            combined_attention_mask = _make_causal_mask(
-                input_shape, inputs_embeds.dtype, past_key_values_length=past_key_values_length
-            ).to(self.device)
+            # import pdb;pdb.set_trace()
+            combined_attention_mask = _make_causal_mask( input_shape, inputs_embeds.dtype, past_key_values_length=past_key_values_length ).to(self.device)
 
         if attention_mask is not None and combined_attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
@@ -863,36 +453,37 @@ class TGSumDecoder(LEDDecoder):
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
 
             if summ_attn_mask is not None: # batch > 1
-                encoder_attention_mask = ~(summ_attn_mask[:, None, :, None].expand_as(_expand_mask(encoder_attention_mask.repeat(input_shape[0], 1), inputs_embeds.dtype, tgt_len=input_shape[-1])).bool())
+                try:
+                    encoder_attention_mask = ~(summ_attn_mask[:, None, :, None].expand_as(_expand_mask(encoder_attention_mask.repeat(input_shape[0], 1), inputs_embeds.dtype, tgt_len=input_shape[-1])).bool())
+                except:
+                    encoder_attention_mask = ~(summ_attn_mask[:, None, :, None].expand_as(_expand_mask(encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])).bool())
+                    # import pdb;pdb.set_trace()
                 encoder_attention_mask = encoder_attention_mask.int()
-
-                encoder_attention_mask_section = ~(summ_attn_mask[:, None, :, None].expand_as(
-                    _expand_mask(encoder_attention_mask_section.repeat(input_shape[0], 1),
-                                 inputs_embeds.dtype, tgt_len=input_shape[-1])).bool())
-                encoder_attention_mask_section = encoder_attention_mask_section.int()
-
+                # try:
+                #     encoder_attention_mask_section = ~(summ_attn_mask[:, None, :, None].expand_as(
+                #         _expand_mask(encoder_attention_mask_section.repeat(input_shape[0], 1),
+                #                      inputs_embeds.dtype, tgt_len=input_shape[-1])).bool())
+                #     encoder_attention_mask_section = encoder_attention_mask_section.int()
+                # except:
+                #     import pdb;
+                #     pdb.set_trace()
             else:
                 if not self.training:
+                    # import pdb;pdb.set_trace()
                     encoder_attention_mask = _expand_mask(encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
                     # import pdb;pdb.set_trace()
-                    encoder_attention_mask_section = _expand_mask(encoder_attention_mask_section, inputs_embeds.dtype, tgt_len=input_shape[-1])
                     # encoder_attention_mask_section = _expand_mask(encoder_attention_mask_section, inputs_embeds.dtype, tgt_len=input_shape[-1])
 
                 else:
-                    try:
-                        encoder_attention_mask = _expand_mask(encoder_attention_mask.repeat(input_shape[0], 1), inputs_embeds.dtype, tgt_len=input_shape[-1])
-                    except:
-                        import pdb;pdb.set_trace()
-                    encoder_attention_mask_section = _expand_mask(encoder_attention_mask_section.repeat(input_shape[0], 1), inputs_embeds.dtype, tgt_len=input_shape[-1])
+                    encoder_attention_mask = _expand_mask(encoder_attention_mask.repeat(input_shape[0], 1), inputs_embeds.dtype, tgt_len=input_shape[-1])
+                    # encoder_attention_mask_section = _expand_mask(encoder_attention_mask_section.repeat(input_shape[0], 1), inputs_embeds.dtype, tgt_len=input_shape[-1])
 
 
 
         # embed positions
         positions = self.embed_positions(input_shape, past_key_values_length)
-
         hidden_states = inputs_embeds + positions
         hidden_states = self.layernorm_embedding(hidden_states)
-
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
         # decoder layers
@@ -944,20 +535,19 @@ class TGSumDecoder(LEDDecoder):
                     combined_attention_mask,
                     encoder_hidden_states,
                     encoder_attention_mask,
-                    encoder_attention_mask_section,
+                    # encoder_attention_mask_section,
                     head_mask[idx] if head_mask is not None else None,
                     cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None,
                     None,
                 )
             else:
-
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=combined_attention_mask,
                     encoder_hidden_states=encoder_hidden_states,
-                    section_encoder_outputs=section_encodings,
+                    # section_encoder_outputs=section_encodings,
                     encoder_attention_mask=encoder_attention_mask,
-                    encoder_attention_mask_section=encoder_attention_mask_section,
+                    # encoder_attention_mask_section=encoder_attention_mask_section,
                     layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                     cross_attn_layer_head_mask=(
                         cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None
@@ -996,57 +586,30 @@ class TGSumDecoder(LEDDecoder):
         )
 
 
-
-
-
 class TGSumModel(LEDModel):
 
-    def __init__(self, config: LEDConfig, use_topic=False, sampling_from='all'):
+    def __init__(self, config: LEDConfig):
 
-        # config.prefix = 'led'
-        # self.base_model_prefix = 'led'
         super().__init__(config)
         padding_idx, vocab_size = config.pad_token_id, config.vocab_size
         self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx)
-
         self.sent_scorer = nn.Linear(config.d_model, 1)
-        self.sect_scorer = nn.Linear(config.d_model, 1)
+        self.Sigmoid = nn.Sigmoid()
 
+        # a cross_attention layer to influence partial-summary to the encoder outputs...
+        self.combiner = LEDDecoderAttention(
+            config.d_model,
+            config.decoder_attention_heads,
+            dropout=config.attention_dropout,
+            # is_decoder=True,
+        )
+
+        # self.sect_scorer = nn.Linear(config.d_model, 1)
         self.encoder = LEDEncoder(config, self.shared)
         self.encoder.gradient_checkpointing = True
-
-        self.decoder = TGSumDecoder(config, self.shared, use_topic=use_topic)
-
+        self.decoder = TGSumDecoder(config, self.shared)
         # Initialize weights and apply final processing
         self.post_init()
-
-        self.use_topic = use_topic
-
-        topic_emb_size = 300
-        self.top_words_dim = 3001
-
-        self.is_hier = True
-        if self.is_hier:
-            self.hier_encoder = TransformerEncoder(config.d_model, d_ff=2048, heads=4,
-                                                   dropout=0.2, num_inter_layers=2)
-                # roberta_config = RobertaConfig.from_pretrained('roberta-large')
-                # roberta_config.num_hidden_layers = 4
-                # self.hier_encoder = RobertaEncoder(roberta_config)
-
-        self.SAMPLING_FROM = sampling_from
-        self.num_topics = 100
-        self.topic_model = DecoderNetwork(input_size=self.top_words_dim, bert_size=config.d_model,
-                                          infnet='combined', n_components=self.num_topics, model_type='prodLDA',
-                                          hidden_sizes=(100, 100), activation='softplus',
-                                          dropout=0.2, learn_priors=True, label_size=0)
-
-        self.topic_gate_linear = nn.Linear(config.d_model + topic_emb_size, config.d_model)
-        self.topic_emb_linear = nn.Linear(topic_emb_size, config.d_model)
-
-        for p in self.topic_gate_linear.parameters():
-            self._set_parameter_linear(p)
-        for p in self.topic_emb_linear.parameters():
-            self._set_parameter_linear(p)
 
 
     def _set_parameter_linear(self, p):
@@ -1064,26 +627,6 @@ class TGSumModel(LEDModel):
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
 
-    def _topic_vec_ge(self, topic_emb, max_len, vec):
-        if self.training:
-            bsz = 1
-        else:
-            bsz = topic_emb.size(0)
-
-        topic_vec = topic_emb.unsqueeze(1).expand(bsz, max_len, -1)
-        mapped_vec = vec
-
-        try:
-            gate = torch.sigmoid(self.topic_gate_linear(torch.cat([mapped_vec, topic_vec], dim=-1)))
-                # gate = torch.sigmoid(self.topic_gate_linear(torch.cat([mapped_vec.unsqueeze(0), topic_vec], dim=-1)))
-        except:
-            gate = torch.sigmoid(self.topic_gate_linear(torch.cat([mapped_vec.unsqueeze(0), topic_vec], dim=-1)))
-            # import pdb;pdb.set_trace()
-        fused_vec = (1 - gate) * self.topic_emb_linear(topic_vec) + gate * mapped_vec
-
-        return fused_vec
-
-
     def get_input_embeddings(self):
         return self.shared
 
@@ -1094,24 +637,18 @@ class TGSumModel(LEDModel):
 
     def get_encoder(self):
         return self.encoder
+    def get_combiner(self):
+        return self.combiner
 
-    def is_hier(self):
-        return self.is_hier
+    def get_extractor(self):
+        return self.extractor
 
-    def get_hier_encoder(self):
-        return self.hier_encoder
 
     def get_sent_scorer(self):
         return self.sent_scorer
 
     def get_sect_scorer(self):
         return self.sect_scorer
-
-    def get_topic_model(self):
-        return self.topic_model
-
-    def get_topic_fuse(self):
-        return self._topic_vec_ge
 
     def get_decoder(self):
         return self.decoder
@@ -1122,19 +659,18 @@ class TGSumModel(LEDModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        src_bow_global=None,
-        src_bow_section=None,
         doc_ids=None,
+        ext_labels=None,
+        ext_labels_mask=None,
+        labels=None,
+        labels_mask=None,
         section_len=None,
         sent_len=None,
         step=None,
-        sections_sentence_encoding=None,
+        reduced_encodings=None,
+        reduced_encodings_mask=None,
         selected_sent_embeddings=None,
-        topic_model_outputs=None,
         section_token_index=None,
-        encoder_section_outputs=None,
-        topic_model_global_outputs=None,
-        topic_model_section_outputs=None,
         attention_mask: Optional[torch.Tensor] = None,
         decoder_input_ids: Optional[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.LongTensor] = None,
@@ -1152,6 +688,8 @@ class TGSumModel(LEDModel):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple[torch.Tensor], LEDSeq2SeqModelOutput]:
 
+        # if not self.training:
+        #     import pdb;pdb.set_trace()
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1160,7 +698,6 @@ class TGSumModel(LEDModel):
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if decoder_input_ids is None and decoder_inputs_embeds is None:
             # import pdb;
             # pdb.set_trace()
@@ -1169,10 +706,6 @@ class TGSumModel(LEDModel):
             )
 
         if encoder_outputs is None:
-            global_attention_mask = torch.zeros_like(attention_mask)
-            sent_ids = ((input_ids[0] == 0).nonzero(as_tuple=True)[0])
-            global_attention_mask[:, sent_ids] = 1
-
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -1183,6 +716,7 @@ class TGSumModel(LEDModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
+
         elif return_dict and not isinstance(encoder_outputs, LEDEncoderBaseModelOutput):
             encoder_outputs = LEDEncoderBaseModelOutput(
                 last_hidden_state=encoder_outputs[0],
@@ -1191,259 +725,119 @@ class TGSumModel(LEDModel):
                 global_attentions=encoder_outputs[3] if len(encoder_outputs) > 3 else None,
             )
 
-        if topic_model_global_outputs is None:
-            prior_mean, prior_variance, posterior_mean, posterior_variance, \
-            posterior_log_variance, word_dists, estimated_labels, topic_emb = self.topic_model(src_bow_global,
-                                                                                               encoder_outputs[0].mean(dim=1),
-                                                                                               labels=None)  # X_contexual is the source embedding
-        else:
-            prior_mean, prior_variance, posterior_mean, posterior_variance, \
-            posterior_log_variance, word_dists, estimated_labels, topic_emb = topic_model_global_outputs
-
-        encoder_outputs.last_hidden_state = self._topic_vec_ge(topic_emb, attention_mask.size(1), encoder_outputs.last_hidden_state)
-
-            # If the user passed a tuple for encoder_outputs, we wrap it in a LEDEncoderBaseModelOutput when return_dict=False
-
-
-
-
 
         """"""""""""""""""""""""""""""""""""""""""""""""""""
                     ext labels and section scores
         """""""""""""""""""""""""""""""""""""""""""""""""""
 
+        # sent_scores = None
+        # sect_scores = None
+        if self.training:
+            sect_idx = ((input_ids[0] == 50265).nonzero(as_tuple=True)[0])
+            try:
+                reduced_encodings = encoder_outputs[0][0][:sect_idx[2]].unsqueeze(0)
+            except:
+                # the instance has two sections
+                reduced_encodings = encoder_outputs[0]
 
-
-        sent_scores = None
-        sect_scores = None
-        if sections_sentence_encoding is None:
-            sent_repr = self.get_repr_from_index(encoder_outputs[0],
-                                                     index=((input_ids[0] == 0).nonzero(as_tuple=True)[0]))
-
-            section_repr = self.get_repr_from_index(encoder_outputs[0],
-                                                    index=((input_ids[0] == input_ids[0][0]).nonzero(as_tuple=True)[0]))
-
-            sent_scores = torch.sigmoid(
-                self.sent_scorer(sent_repr)
-            ).squeeze(-1)
-
-            sect_scores = torch.nn.functional.softmax(self.sect_scorer(section_repr), dim=-2).squeeze(-1)
-
-
-            LIMIT = 4096  # tokens
-
-            if self.SAMPLING_FROM=='section':
-                sample_sect_dist = torch.round(torch.tensor([LIMIT] * (section_repr.size(1))).unsqueeze(0).cuda() * sect_scores.squeeze(-1))
-
-                sent_real_ids = (input_ids[0] == 0).nonzero(as_tuple=True)[0]
-                end_pre_ids = (input_ids[0] == 2).nonzero(as_tuple=True)[0]
-
-                try:
-                    sent_len = ((end_pre_ids - sent_real_ids) + 1)[None, :]
-                except:
-                    print('found noncons')
-                    # import pdb;pdb.set_trace()
-
-                try:
-                    sects_batch_sent_scores = pad_sequence(torch.split(sent_scores[0], section_len[0].tolist()), batch_first=True, padding_value=-1)[None, :, :].repeat(input_ids.size(0), 1, 1)
-                except Exception as ee:
-                    print(ee)
-                    print(doc_ids)
-
-                try:
-                    sects_batch_sent_lens = pad_sequence(torch.split(sent_len[0], section_len[0].tolist()), batch_first=True, padding_value=0)[None, :, :].repeat(input_ids.size(0), 1, 1)
-                except:
-                    import pdb;pdb.set_trace()
-
-                # sects_batch_sent_lens.sum(dim=2)
-                # updating sample_sect_dist based on the total number of tokens in each section.
-
-                updated_sect_dist = (sample_sect_dist - sects_batch_sent_lens.sum(dim=2))
-                fulfilled_sects = updated_sect_dist > 0
-
-                if LIMIT < input_ids.size(-1) and ((~fulfilled_sects).float().sum()) > 0 and fulfilled_sects.float().sum() != fulfilled_sects.size(1):
-                    remaining_toks = (updated_sect_dist * fulfilled_sects).sum()
-                    revisit_section_dist = (sect_scores * ~fulfilled_sects) / (sect_scores * ~fulfilled_sects).sum()
-                    sample_sect_dist_v2 = torch.round(revisit_section_dist * remaining_toks)
-                    sample_sect_dist += sample_sect_dist_v2
-                    sample_sect_dist = torch.where(fulfilled_sects, sample_sect_dist-updated_sect_dist, sample_sect_dist)
-
-                sect_sent_mask = (sects_batch_sent_lens > 0).float()
-
-                top_sents_idxs = torch.argsort(sects_batch_sent_scores, descending=True)
-
-                top_sects_batch_sent_lens = torch.zeros_like(top_sents_idxs).cuda()
-                top_sects_batch_sent_lens.scatter_(2, top_sents_idxs, sects_batch_sent_lens)
-
-                sect_sent_n_selects = (~((torch.cumsum(top_sects_batch_sent_lens, dim=-1)) > sample_sect_dist[:, :, None].expand_as(top_sects_batch_sent_lens)) * sect_sent_mask).sum(dim=-1)
-                top_sents_mask = ((pad_sequence([torch.arange(xx) for x in sect_sent_n_selects for xx in x], padding_value=-1).t()) != -1).cuda()
-                pre_idx = top_sents_idxs[:, :, :int(sect_sent_n_selects.max().item())] * top_sents_mask
-
-                section_len_cum = torch.cumsum(section_len, dim=-1)
-                shifted_section_len = torch.cat((torch.tensor([0])[None, :].cuda(), section_len_cum), dim=-1)
-                # pre_idx_hyp = torch.cat((pre_idx, torch.zeros_like(pre_idx)[:, :, :1]), dim=-1)
-                shifted_section_len = shifted_section_len[:, :, None].repeat(1, 1, pre_idx.size(2))[:, :-1, :]
-                pre_idx = (((pre_idx) + shifted_section_len) * top_sents_mask)
-
-                pre_idx = ((pre_idx+1) * top_sents_mask) - 1
-
-                pre_idx = torch.where(pre_idx > -1, sent_real_ids[pre_idx], 10000000)
-                end_pre_ids = (pre_idx + top_sects_batch_sent_lens[:,:,:pre_idx.size(-1)])
-
-                # sort ids
-                pre_idx = pre_idx.sort()[0]
-                end_pre_ids = end_pre_ids.sort()[0]
-
-                sections_sentence_encoding = []
-                selected_sent_embeddings = []
-
-                for l in range(pre_idx.size(1)):
-                    # import pdb;
-                    # pdb.set_trace()
-                    if top_sents_mask[l].float().sum() == 0:
-                        continue
-                    section_sent_encoding = []
-                    start_idxs = pre_idx[0, l]
-                    end_idxs = end_pre_ids[0, l]
-
-                    for ll in range(start_idxs.size(-1)):
-                        # import pdb;pdb.set_trace()
-
-                        if start_idxs[ll] > 10000000 - 1:
-                            continue
-                        try:
-                            sent_encoding = encoder_outputs[0][:, start_idxs[ll]:end_idxs[ll]+1]
-                        except:
-                            sent_encoding = encoder_outputs[0][:, start_idxs[ll]:end_idxs[ll]]
-
-                        selected_sent_embeddings.append(encoder_outputs[0][:, start_idxs[ll]].unsqueeze(0))
-                        section_sent_encoding.append(sent_encoding)
-                    try:
-                        sections_sentence_encoding.append(torch.cat(section_sent_encoding, dim=1))
-                    except:
-                        import pdb;pdb.set_trace()
-
-                sections_sentence_encoding = torch.cat(sections_sentence_encoding, dim=1).cuda()
-                selected_sent_embeddings = torch.cat(selected_sent_embeddings, dim=1).cuda()
-
-                if self.is_hier:
-                    selected_sent_embeddings = self.hier_encoder(selected_sent_embeddings,
-                                                             # torch.ones(selected_sent_embeddings.size(0), selected_sent_embeddings.size(1)).cuda()).last_hidden_state
-                                                             torch.ones(selected_sent_embeddings.size(0), selected_sent_embeddings.size(1)).bool().cuda()
-                                                                 )
-
-
-            else:
-
-                sent_real_ids = (input_ids[0] == 0).nonzero(as_tuple=True)[0]
-                end_pre_ids = (input_ids[0] == 2).nonzero(as_tuple=True)[0]
-
-                sent_len = ((end_pre_ids - sent_real_ids) + 1)[None, :]
-
-                top_sents_ids = torch.argsort(sent_scores, descending=True)
-                # top_sents_len = torch.zeros_like(sent_len)
-
-                # top_sents_len.scatter_(1, top_sents_ids, sent_len)
-                top_sents_len = torch.index_select(sent_len, 1, top_sents_ids[0])
-                top_sents_included = (~(torch.cumsum(top_sents_len, dim=-1) > LIMIT)).sum()
-                top_sents_ids = top_sents_ids[:, :top_sents_included]
-
-
-                top_sents_start_ids = sent_real_ids[top_sents_ids.sort(dim=1)[0]]
-                sent_len = torch.index_select(sent_len, 1, top_sents_ids.sort(dim=1)[0].squeeze(0))
-                top_sens_end_ids = top_sents_start_ids + sent_len
-
-                masked_top_sents_input = torch.zeros_like(input_ids)
-                num_of_masked= 0
-                selected_sent_embeddings = []
-                for start_idx, end_idx in zip(top_sents_start_ids[0], top_sens_end_ids[0]):
-                    masked_top_sents_input[:, start_idx:end_idx] = 1
-                    num_of_masked += len(masked_top_sents_input[0, start_idx:end_idx])
-                    selected_sent_embeddings.append(encoder_outputs[0][:, start_idx])
-
-                try:
-                    selected_sent_embeddings = torch.cat(selected_sent_embeddings, dim=0)
-                except:
-                    print(doc_ids)
-                    import pdb;pdb.set_trace()
-
-                selected_sent_embeddings = selected_sent_embeddings.unsqueeze(0)
-                # torch.where(masked_top_sents_input > -1, input_ids,)
-                mask = masked_top_sents_input.unsqueeze(-1).expand_as(encoder_outputs[0]).bool()
-                sections_sentence_encoding = torch.masked_select(encoder_outputs[0], mask).view(1, num_of_masked, -1)
-                if self.is_hier:
-                    selected_sent_embeddings = self.hier_encoder(selected_sent_embeddings, torch.ones(selected_sent_embeddings.size(0), selected_sent_embeddings.size(1)).bool().cuda())
-
-            """""
-            
-            """
-
-        bsz = 1
-        if decoder_input_ids is not None:
-            n_summary = len(decoder_input_ids[0])
-        else: # in validation/test we will generate one summary
-            n_summary = 1
-
-
-        # creating summary attention mask; no need for summ_attn_mask in val/test
-        summ_attn_mask = None
-        if bsz * n_summary > 1 and self.training:
-            summ_attn_mask = (pad_sequence(decoder_input_ids[0], batch_first=True, padding_value=-1) != -1).to(attention_mask.dtype)
-
-        if self.training: # in validation and test we will generate only one summary + if batching is needed in training
-            decoder_input_ids = pad_sequence(decoder_input_ids[0], batch_first=True, padding_value=self.config.pad_token_id).unsqueeze(0).view(bsz*n_summary, -1)
-
-
+            sent_scores = None
 
         """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
         """"""""""""""""""""" Section encoding """"""""""""""""""""""""
         """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
+        sent_scores_lst = None
 
-        # if encoder_section_outputs is None:
-        #     section_token_indices = ((input_ids[0] == 0).nonzero(as_tuple=True)[0])
-        #     section_pre_encodings = torch.index_select(encoder_outputs[0], 1, section_token_indices)
-        #
-        # if encoder_section_outputs is None:
-        #     section_mask = torch.BoolTensor([True] * section_pre_encodings.size(1)).unsqueeze(0).cuda()
-        ##     encoder_section_outputs = self.encoder_section(hidden_states=section_pre_encodings, topic_emb=topic_emb_sct.unsqueeze(0), attention_mask=section_mask)[0]
-        #
-        # else:
-        ##     encoder_section_outputs is not none.
-            # section_mask = torch.BoolTensor([True] * encoder_section_outputs.size(1)).unsqueeze(0).repeat(encoder_section_outputs.size(0), 1).cuda()
+        if self.training:
+        # loop through sentences...
+            decoder_outputs_lst = []
+            partial_summary_lst = []
+            combiner_mask_lst = []
+            sent_scores_lst = []
+            for iteration in range(decoder_input_ids.shape[1]):
+                # current sentence
+                decoder_input_ids_iteration = decoder_input_ids[:, iteration, :][:, :]
+                decoder_input_ids_mask = labels_mask[:, iteration, :][:, :]
 
-        # if not self.training:
-        #     import pdb;pdb.set_trace()
+                if iteration != 0:
+                    # call on encoder and produce partial summary-aware encoder outputs...
+                    partial_summary = torch.stack(partial_summary_lst, dim=2).view(decoder_input_ids.shape[0], -1, 1024)
+                    # creating attention mask...
+                    combiner_mask = torch.stack(combiner_mask_lst, dim=2).view(decoder_input_ids.shape[0], -1)
+                    combiner_mask = combiner_mask[:, None, None, :].repeat(1, 1, input_ids.shape[1], 1)
 
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            section_encodings=selected_sent_embeddings.cuda(),
-            attention_mask=decoder_attention_mask,
-            encoder_attention_mask_section=torch.ones(selected_sent_embeddings.size(0), selected_sent_embeddings.size(1)).cuda(),
-            summ_attn_mask=summ_attn_mask,
-            encoder_hidden_states=sections_sentence_encoding.cuda(),
-            encoder_attention_mask=torch.ones(sections_sentence_encoding.size(0), sections_sentence_encoding.size(1)).cuda(),
-            head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=decoder_inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+                    encoder_outputs_x, cross_attn_weights_word, cross_attn_present_key_value_word = \
+                        self.combiner(hidden_states=encoder_outputs[0].repeat(partial_summary.shape[0], 1, 1),
+                                      key_value_states=partial_summary if self.training else partial_summary,
+                                      attention_mask= combiner_mask,
+                        )
+                        # self.combiner(hidden_states=encoder_outputs[0],  key_value_states=decoder_outputs[0].repeat(encoder_outputs[0].size(0), 1,1) if self.training else decoder_outputs[0], attention_mask= combiner_mask,)
+                        # self.combiner(hidden_states=encoder_outputs[0],  key_value_states=partial_summary if self.training else partial_summary,)
+
+                    reduced_encodings, reduced_encodings_mask, sent_scores = self.extractor(encoder_outputs_x,
+                                                                                            ( (input_ids[0] == 0).nonzero(as_tuple=True)[0],
+                                                                                            (input_ids[0] == 2).nonzero(as_tuple=True)[0] ),
+                                                                                            LIMIT=1024)
+
+                decoder_outputs = self.decoder(
+                    input_ids=decoder_input_ids_iteration,
+                    attention_mask=decoder_attention_mask,
+                    summ_attn_mask=decoder_input_ids_mask,
+                    encoder_hidden_states=reduced_encodings,
+                    # encoder_attention_mask=torch.ones(reduced_encoding.size(0), reduced_encoding.size(1)).cuda(),
+                    encoder_attention_mask=torch.ones((reduced_encodings.shape[0], reduced_encodings.shape[1])).cuda() if iteration==0 else reduced_encodings_mask,
+                    head_mask=decoder_head_mask,
+                    cross_attn_head_mask=cross_attn_head_mask,
+                    past_key_values=past_key_values,
+                    inputs_embeds=decoder_inputs_embeds,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+                partial_summary_lst.append(decoder_outputs[0])
+                decoder_outputs_lst.append(decoder_outputs[0][:, None, :, :])
+
+                if sent_scores is not None:
+                    sent_scores_lst.append(sent_scores[:, :, 0][:, None, :])
+
+                combiner_mask_lst.append(decoder_input_ids_mask)
+
+            decoder_outputs_lst = torch.cat(decoder_outputs_lst, dim=1)
+            sent_scores_lst = torch.cat(sent_scores_lst, dim=1)
+        else:
+            # inference time...
+            # should generate the summary and check if a sentence is emitted...
+            try:
+                decoder_outputs = self.decoder(
+                    input_ids=decoder_input_ids,
+                    attention_mask=decoder_attention_mask,
+                    # summ_attn_mask=decoder_input_ids_mask,
+                    encoder_hidden_states=reduced_encodings,
+                    # encoder_hidden_states=reduced_encodings,
+                    encoder_attention_mask=reduced_encodings_mask,
+                    # encoder_attention_mask=torch.ones((reduced_encodings.shape[0], reduced_encodings.shape[1])),
+                    head_mask=decoder_head_mask,
+                    cross_attn_head_mask=cross_attn_head_mask,
+                    past_key_values=past_key_values,
+                    inputs_embeds=decoder_inputs_embeds,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            except:
+                import pdb;pdb.set_trace()
 
         if not return_dict:
             return decoder_outputs + encoder_outputs
 
-        # import pdb;pdb.set_trace()
         return LEDSeq2SeqModelOutput(
-            last_hidden_state=decoder_outputs.last_hidden_state,
-            topic_info=(src_bow_global, word_dists, prior_mean, prior_variance, posterior_mean, posterior_variance, posterior_log_variance) if self.use_topic else None,
-            past_key_values=decoder_outputs.past_key_values,
-            sent_scores=sent_scores if sent_scores is not None else None,
-            sect_scores=sect_scores if sect_scores is not None else None,
-            decoder_hidden_states=decoder_outputs.hidden_states,
+            last_hidden_state=decoder_outputs_lst if self.training else decoder_outputs[0],
+            # past_key_values=decoder_outputs.past_key_values,
+            sent_scores=sent_scores_lst,
+            # sect_scores=sect_scores if sect_scores is not None else None,
+            # decoder_hidden_states=decoder_outputs.hidden_states,
             decoder_attentions=decoder_outputs.attentions,
             cross_attentions=decoder_outputs.cross_attentions,
             encoder_last_hidden_state=encoder_outputs.last_hidden_state,
@@ -1452,19 +846,68 @@ class TGSumModel(LEDModel):
             encoder_global_attentions=encoder_outputs.global_attentions,
         )
 
+    def extractor(self, encoder_outputs, sent_boundaries, LIMIT=1024):
+        sent_real_ids, end_pre_ids = sent_boundaries
+        sent_repr = self.get_repr_from_index(encoder_outputs, index=sent_real_ids)
+        # section_repr = self.get_repr_from_index(encoder_outputs[0], index=((input_ids[0] == input_ids[0][0]).nonzero(as_tuple=True)[0]))
+        sent_scores = self.Sigmoid(self.sent_scorer(sent_repr))
+        # sect_scores = self.Softmax(
+        #     self.sect_scorer(section_repr)
+        # )
+        sent_len = ((end_pre_ids - sent_real_ids) + 1)[None, :]
+        top_sents_ids = torch.argsort(sent_scores, descending=True, dim=1).squeeze(-1)
+
+        reduced_encoding_list = []
+        max_len = -100
+        for sum_idx in range(encoder_outputs.shape[0]):
+            top_sents_len_i = torch.index_select(sent_len, 1, top_sents_ids[sum_idx])
+            top_sents_included_i = (~(torch.cumsum(top_sents_len_i, dim=-1) > LIMIT)).sum()
+            top_sents_ids_i = top_sents_ids[sum_idx, :top_sents_included_i].unsqueeze(0)
+            sent_len_i = torch.index_select(sent_len, 1, top_sents_ids_i.sort(dim=1)[0].squeeze(0))
+            masked_top_sents_input = torch.zeros((1, encoder_outputs.shape[1])).cuda()
+            num_of_masked = 0
+            selected_sent_embeddings = []
+            top_sents_start_ids_id = sent_real_ids[top_sents_ids_i.sort(dim=1)[0]]
+            top_sens_end_ids_i = top_sents_start_ids_id + sent_len_i
+            for start_idx, end_idx in zip(top_sents_start_ids_id[0], top_sens_end_ids_i[0]):
+                masked_top_sents_input[0, start_idx:end_idx] = 1
+                num_of_masked += len(masked_top_sents_input[0, start_idx:end_idx])
+                selected_sent_embeddings.append(encoder_outputs[sum_idx, start_idx])
+
+            if num_of_masked > max_len:
+                max_len = num_of_masked
+
+            # selected_sent_embeddings = torch.stack(selected_sent_embeddings, dim=0)
+            # selected_sent_embeddings = selected_sent_embeddings.unsqueeze(0)
+            # torch.where(masked_top_sents_input > -1, input_ids,)
+            mask = masked_top_sents_input.unsqueeze(-1).expand_as(encoder_outputs[sum_idx].unsqueeze(0)).bool()
+            reduced_encodings_i = torch.masked_select(encoder_outputs[sum_idx], mask).view(1, num_of_masked, -1)
+            reduced_encoding_list.append(reduced_encodings_i)
+
+        # from torch.nn.utils.rnn import pad_sequence
+        # pad_sequence(reduced_encoding_list)
+
+        # create mask and pad...
+        masked_top_sents_input = torch.zeros((top_sents_ids.shape[0], max_len)).cuda()
+
+        for j, reduced_enc in enumerate(reduced_encoding_list):
+
+            masked_top_sents_input[j, :reduced_enc.shape[1]] = 1
+
+            if max_len > reduced_enc.shape[1]:
+                # pad here
+                appended = torch.zeros((1, max_len-reduced_enc.shape[1], reduced_enc.shape[-1])).cuda()
+                reduced_encoding_list[j] = torch.cat((reduced_enc, appended), dim=1)
+
+        reduced_encodings = torch.cat(reduced_encoding_list, dim=0)
+
+        return reduced_encodings, masked_top_sents_input, sent_scores
 
 class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin):
     # _keys_to_ignore_on_load_missing = [r"final_logits_bias", r"lm_head\.weight"]
-    def __init__(self, config: LEDConfig, use_topic=True, task='all'):
+    def __init__(self, config: LEDConfig):
         super().__init__(config)
-        self.SAMPLING_FROM = 'all'
-
-        self.led = TGSumModel(config, use_topic=use_topic, sampling_from=self.SAMPLING_FROM)
-        self.task = task
-
-        global do_topic
-        do_topic = use_topic
-        self.use_topic = use_topic
+        self.led = TGSumModel(config)
         # Initialize weights and apply final processing
         # self.register_buffer("final_logits_bias", torch.zeros((1, self.led.shared.num_embeddings)))
         self.post_init()
@@ -1476,6 +919,11 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
 
     def get_encoder(self):
         return self.led.get_encoder()
+    def get_combiner(self):
+        return self.led.get_combiner()
+
+    def get_extractor(self):
+        return self.led.extractor
 
     def is_hier(self):
         return self.led.is_hier
@@ -1518,73 +966,86 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
 
+    def _convert_2d_labels_to_tensor(self, sum_sents_labels=None, labels=None, decoder_input_ids=None):
 
-    def _topic_loss(self, inputs, word_dists, prior_mean, prior_variance,
-              posterior_mean, posterior_variance, posterior_log_variance, is_sct=False):
+        sum_sent_labels_tensor, ext_labels_mask, padded_labels, labels_mask = None, None, None, None
 
-        # KL term
-        # var division term
-        var_division = torch.sum(posterior_variance / prior_variance, dim=1)
-        # diff means term
-        diff_means = prior_mean - posterior_mean
-        diff_term = torch.sum(
-            (diff_means * diff_means) / prior_variance, dim=1)
-        # logvar det division term
-        logvar_det_division = \
-            prior_variance.log().sum() - posterior_log_variance.sum(dim=1)
-        # combine terms
+        if sum_sents_labels is not None:
+            sum_sent_labels_tensor = [[] for _ in range(len(sum_sents_labels[0][0]))]
 
-        if not is_sct:
-            KL = 0.5 * (var_division + diff_term - self.n_components + logvar_det_division)
-            RL = -torch.sum(inputs * torch.log(word_dists + 1e-10), dim=1)
-        else:
-            KL = (0.5 * (var_division + diff_term - self.n_components + logvar_det_division)).mean()
-            RL = -(torch.sum(inputs * torch.log(word_dists + 1e-10), dim=2).mean())
+            for sample_ext_labels in sum_sents_labels:
+                for sum_idx, sum_sent_sect_labels in enumerate(sample_ext_labels[0]):
+                    sum_sent_labels_tensor[sum_idx].extend([[] for _ in range(len(sum_sent_sect_labels))])
+
+            for sample_ext_labels in sum_sents_labels:
+                for jsect_labels, sect_sent_labels in enumerate(sample_ext_labels):
+                    for sum_idx, sum_sent_sect_labels in enumerate(sect_sent_labels):
+                        for sent_idx, sum_sent_sect_label in enumerate(sum_sent_sect_labels):
+                            sum_sent_labels_tensor[sum_idx][sent_idx].extend(sum_sent_sect_label.cpu().numpy().tolist())
+
+            # padding sentence based
+            max_len = max([len(sum_sent_labels_tensor[j]) for j in range(len(sum_sent_labels_tensor))])
+            ext_labels_mask = np.ones((len(sum_sent_labels_tensor), max_len, len(sum_sent_labels_tensor[0][0])))
+
+            for sum_idx, sum_sent_sect_labels in enumerate(sum_sent_labels_tensor):
+                diff = max_len - len(sum_sent_sect_labels)
+                if diff > 0:
+                    sum_sent_sect_labels.extend([[0 for _ in range(len(sum_sent_sect_labels[0]))]] * diff )
+                    sum_sent_labels_tensor[sum_idx] = sum_sent_sect_labels
+                    for df_idx in range(diff):
+                        ext_labels_mask[sum_idx, -df_idx-1] = np.zeros(len(sum_sent_labels_tensor[0][0]))
+
+            ext_labels_mask = torch.Tensor(ext_labels_mask).cuda()
+            sum_sent_labels_tensor = torch.Tensor(sum_sent_labels_tensor).cuda()
+
+        if labels is not None:
+            labels_tensor = [[] for _ in range(len(labels[0]))]
+            max_sent_len = -100
+            max_sent_num = -100
+            for sample_labels in labels:
+                for sum_idx, sum_sent_sect_labels in enumerate(sample_labels):
+                    sent_indices = ((sum_sent_sect_labels == 0).nonzero(as_tuple=True)[0])
+                    sents = list(torch.tensor_split(sum_sent_sect_labels, sent_indices.cpu().tolist(), dim=0)[1:])
+
+                    if len(sents) > max_sent_num:
+                        max_sent_num = len(sents)
+
+                    for sent in sents:
+                        if len(sent) > max_sent_len:
+                            max_sent_len = len(sent)
+                        labels_tensor[sum_idx].append(sent)
+
+        # padding the labels...
+        # num_sum, num_sents, max_sent_len
+            labels_mask = np.zeros((len(labels[0]), max_sent_num, max_sent_len))
+            padded_labels = np.zeros((len(labels[0]), max_sent_num, max_sent_len), dtype=np.long) - 100
+
+            for sum_idx, sum_labels in enumerate(labels_tensor):
 
 
-        return KL, RL
-
-    def _convert_2d_labels_to_tensor(self, ext_labels, section_scores):
-
-        # removing batch
-        try:
-            ext_labels_tensor = [[] for _ in range(len(ext_labels[0][0]))]
-        except:
-            import pdb;pdb.set_trace()
-
-        for ext_labels_batch in ext_labels:
-            for sect_labels in ext_labels_batch:
-                for j, sum_sec_label in enumerate(sect_labels):
-                    ext_labels_tensor[j].extend(sum_sec_label.cpu().numpy().tolist())
+                for sent_idx, sent_labels in enumerate(sum_labels):
+                    diff_sent_tokens = max_sent_len - len(sent_labels)
+                    if diff_sent_tokens > 0:
+                        padded_labels[sum_idx][sent_idx] = torch.cat((sent_labels.cpu(), (torch.zeros(diff_sent_tokens)) - 100)).long()
+                        labels_mask[sum_idx][sent_idx][:len(sent_labels)] = 1
 
 
-        ext_labels_tensor_ret = [torch.Tensor(ext_label_tensor).cuda() for ext_label_tensor in ext_labels_tensor]
+            padded_labels = torch.Tensor(padded_labels).cuda().long()
+            labels_mask = torch.Tensor(labels_mask).cuda().long()
 
-        section_scores_tensor = [[] for _ in range(len(section_scores[0][0]))]
-
-        for section_scores_batch in section_scores:
-            for sect_scores in section_scores_batch:
-                for j, sum_sec_label in enumerate(sect_scores):
-                    section_scores_tensor[j].append(sum_sec_label.item())
-
-        section_scores_tensor_ret = [torch.Tensor(x).cuda() for x in section_scores_tensor]
-
-        # section_scores_tensor = torch.Tensor(section_scores_tensor).cuda()
-        # import pdb;pdb.set_trace()
-        # section_scores_tensor = [torch.Tensor(section_score_tensor).cuda() for section_score_tensor_batch in section_scores_tensor]
-
-        return ext_labels_tensor_ret, section_scores_tensor_ret
+        return sum_sent_labels_tensor, ext_labels_mask, padded_labels, labels_mask
 
     def forward(
             self,
             input_ids=None,
             src_bow_global=None,
-            # src_bow_section=None,
             ext_labels=None,
             section_scores=None,
+            sum_sents_labels=None,
             section_len=None,
             sent_len=None,
-            sections_sentence_encoding=None,
+            reduced_encodings=None,
+            reduced_encodings_mask=None,
             selected_sent_embeddings=None,
             attention_mask=None,
             decoder_input_ids=None,
@@ -1605,6 +1066,7 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
             output_hidden_states=None,
             return_dict=None,
             doc_ids=None,
+            use_topic=None,
             step=None, # for debugging
             split_noise=False,
             global_attention_mask: Optional[torch.FloatTensor] = None,
@@ -1617,9 +1079,19 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
         Returns:
         """
 
-        ext_labels, section_scores = self._convert_2d_labels_to_tensor(ext_labels, section_scores)
 
-        # import pdb;pdb.set_trace()
+        ext_labels, ext_labels_mask, labels, labels_mask = self._convert_2d_labels_to_tensor(sum_sents_labels, labels, decoder_input_ids)
+
+        # truncate the ext_labels to the labels length
+        if ext_labels is not None:
+            ext_labels = ext_labels[:, :labels.shape[1], :]
+            ext_labels_mask = ext_labels_mask[:, :labels.shape[1], :]
+
+        # _, _, decoder_input_ids, _ = self._convert_2d_labels_to_tensor(ext_labels,
+        #                                                                sum_sents_labels,
+        #                                                                decoder_input_ids, )
+        if labels is not None:
+            decoder_input_ids = shift_tokens_right_2d(labels, self.config.pad_token_id, self.config.decoder_start_token_id, labels)
 
         # self.set_split_noise(split_noise)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -1630,25 +1102,20 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
                 logger.warning("The `use_cache` argument is changed to `False` since `labels` is provided.")
             use_cache = False
             if decoder_input_ids is None and decoder_inputs_embeds is None:
-                decoder_input_ids = shift_tokens_right(
-                    labels, self.config.pad_token_id, self.config.decoder_start_token_id
-                )
+                decoder_input_ids = shift_tokens_right_2d(labels, self.config.pad_token_id, self.config.decoder_start_token_id, labels)
+
 
         outputs = self.led(
             input_ids,
-            src_bow_global=src_bow_global,
-            # src_bow_section=src_bow_section,
             attention_mask=attention_mask,
             section_len=section_len,
             sent_len=sent_len,
             decoder_input_ids=decoder_input_ids,
-            sections_sentence_encoding=sections_sentence_encoding,
+            reduced_encodings=reduced_encodings,
+            reduced_encodings_mask=reduced_encodings_mask,
             selected_sent_embeddings=selected_sent_embeddings,
             global_attention_mask=global_attention_mask,
             encoder_outputs=encoder_outputs,
-            encoder_section_outputs=encoder_section_outputs,
-            topic_model_global_outputs=topic_model_global_outputs,
-            topic_model_section_outputs=topic_model_section_outputs,
             decoder_attention_mask=decoder_attention_mask,
             head_mask=head_mask,
             decoder_head_mask=decoder_head_mask,
@@ -1661,84 +1128,72 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             doc_ids=doc_ids,
+            ext_labels=ext_labels,
+            ext_labels_mask=ext_labels_mask,
+            labels=labels,
+            labels_mask=labels_mask,
             step=step,
         )
 
-        if self.task == 'ext':
-            sect_scores, sent_scores = outputs
-            loss_sent_fct = nn.BCELoss()
-            loss_sect_fct = nn.MSELoss(reduction='sum')
-            ext_labels = pad_sequence(ext_labels, batch_first=True, padding_value=-100).unsqueeze(0).cuda()
-            section_scores = pad_sequence(section_scores, batch_first=True, padding_value=-100).unsqueeze(0).cuda()
-            loss_sent = loss_sent_fct(sent_scores.expand_as(ext_labels.squeeze(0)), ext_labels.squeeze(0))
-            loss_sect = loss_sect_fct(sect_scores.expand_as(section_scores.squeeze(0)), section_scores.squeeze(0))
 
-            return Seq2SeqLMOutput(
-                sect_loss=loss_sect,
-                sent_loss=loss_sent,
-            )
+        # calculate loss for each summary sentence...
+        loss_sent = 0
+        masked_lm_loss = 0
 
-        elif self.task == 'all':
-            # import pdb;pdb.set_trace()
+        if self.training:
+            lm_logits = []
+            for sent_iteration in range(outputs[0].shape[1]):
+                lm_logits_iteration = self.lm_head(outputs[0][:, sent_iteration, :, :]) + self.final_logits_bias
+                # lm_logits.append(lm_logits_iteration[:, None, :, :])
+                lm_logits.append(lm_logits_iteration)
+                labels_iteration = labels[:, sent_iteration, :]
+                if sent_iteration != 0:
+                    sent_score_iteration = outputs.sent_scores[:, sent_iteration-1, :]
+                    ext_labels_iteration = ext_labels[:, sent_iteration-1, :]
+                if labels is not None:
+                    loss_fct = CrossEntropyLoss()
+                    masked_lm_loss_i = loss_fct(lm_logits_iteration.view(-1, self.config.vocab_size), labels_iteration.reshape(-1).long())
+                    masked_lm_loss += masked_lm_loss_i
+                    if outputs.sent_scores is not None and sent_iteration != 0:
+                        loss_sent_fct = nn.BCELoss()
+                        loss_sent_i = loss_sent_fct(sent_score_iteration, ext_labels_iteration)
+                        loss_sent += loss_sent_i
+
+            loss_sent = loss_sent / len(ext_labels)
+            masked_lm_loss = masked_lm_loss / len(lm_logits)
+
+            if not return_dict:
+                output = (lm_logits_iteration,) + outputs[1:]
+                return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+        # if not self.training:
+        #     import pdb;pdb.set_trace()
+        else:
             lm_logits = self.lm_head(outputs[0]) + self.final_logits_bias
 
             masked_lm_loss = None
-            topic_loss = None
-            loss_sent = None
-            loss_sect = None
             if labels is not None:
-
                 loss_fct = CrossEntropyLoss()
-                if outputs.sent_scores is not None:
-                    loss_sent_fct = nn.BCELoss()
-                    loss_sect_fct = nn.MSELoss(reduction='sum')
-
-                labels = pad_sequence(labels[0], batch_first=True, padding_value=-100).unsqueeze(0).cuda()
-                if outputs.sent_scores is not None:
-                    ext_labels = pad_sequence(ext_labels, batch_first=True, padding_value=-100).unsqueeze(0).cuda()
-                    section_scores = pad_sequence(section_scores, batch_first=True, padding_value=-100).unsqueeze(0).cuda()
-
-
                 masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
-                if outputs.sent_scores is not None:
-                    loss_sent = loss_sent_fct(outputs.sent_scores.expand_as(ext_labels.squeeze(0)), ext_labels.squeeze(0))
-                    loss_sect = loss_sect_fct(outputs.sect_scores.expand_as(section_scores.squeeze(0)), section_scores.squeeze(0))
-                    # masked_lm_loss += (loss_sent + loss_sect)
-
-                if self.use_topic:
-                    source_bow, word_dists, prior_mean, prior_variance, posterior_mean, \
-                    posterior_variance, posterior_log_variance = outputs.topic_info
-
-                    # backward pass
-                    self.n_components = self.led.num_topics
-                    kl_loss, rl_loss = self._topic_loss(
-                        source_bow, word_dists, prior_mean, prior_variance, posterior_mean, posterior_variance,
-                        posterior_log_variance
-                    )
-
-                    # this is gonna be added to the whole loss...
-                    topic_loss = ((kl_loss + rl_loss)).sum()
-
 
             if not return_dict:
                 output = (lm_logits,) + outputs[1:]
                 return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
-            # if not self.training:
-            #     import pdb;pdb.set_trace()
-            return Seq2SeqLMOutput(
-                loss=masked_lm_loss,
-                loss_topic=topic_loss if self.use_topic else None,
-                sect_loss=loss_sect,
-                sent_loss=loss_sent,
-                logits=lm_logits,
-                past_key_values=outputs.past_key_values,
-                decoder_hidden_states=outputs.decoder_hidden_states,
-                decoder_attentions=outputs.decoder_attentions,
-                cross_attentions=outputs.cross_attentions,
-                encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-                encoder_hidden_states=outputs.encoder_hidden_states,
-                encoder_attentions=outputs.encoder_attentions,
-            )
+
+        return Seq2SeqLMOutput(
+            loss=masked_lm_loss,
+            # loss_topic=topic_loss if self.use_topic else None,
+            # sect_loss=loss_sect,
+            sent_loss=loss_sent,
+            logits=lm_logits,
+            past_key_values=outputs.past_key_values,
+            decoder_hidden_states=outputs.decoder_hidden_states,
+            decoder_attentions=outputs.decoder_attentions,
+            cross_attentions=outputs.cross_attentions,
+            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+            encoder_hidden_states=outputs.encoder_hidden_states,
+            encoder_attentions=outputs.encoder_attentions,
+            decoder_last_hidden_states=outputs[0],
+        )
 
     def prepare_inputs_for_generation(
             self,
@@ -1758,7 +1213,8 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
             ext_labels=None,
             input_ids=None,
             src_ids=None,
-            sections_sentence_encoding=None,
+            reduced_encodings=None,
+            reduced_encodings_mask=None,
             selected_sent_embeddings=None,
             **kwargs
     ):
@@ -1768,7 +1224,8 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
 
         return {
             "input_ids": src_ids,
-            "sections_sentence_encoding": sections_sentence_encoding,
+            "reduced_encodings": reduced_encodings,
+            "reduced_encodings_mask": reduced_encodings_mask,
             "selected_sent_embeddings": selected_sent_embeddings,
             "encoder_outputs": encoder_outputs,
             "past_key_values": past,
@@ -2139,7 +1596,7 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
         init_contexts = [no_init_weights(_enable=_fast_init)]
 
         with ContextManagers(init_contexts):
-            model = cls(config, use_topic=use_topic, task=task, *model_args, **model_kwargs)
+            model = cls(config, *model_args, **model_kwargs)
             # model.resize_token_embeddings(50267) # be causious
             # tokenizer = TGSumTokenizer.from_pretrained(
             #     '/disk0/sajad/.cache/sci-trained-models/mup-led-arxiv-6144-ExtFinetuned/checkpoint-18000/',

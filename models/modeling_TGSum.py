@@ -1374,36 +1374,13 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
         self.lm_head = new_embeddings
 
 
-    def _topic_loss(self, inputs, word_dists, prior_mean, prior_variance,
-              posterior_mean, posterior_variance, posterior_log_variance):
-
-        # KL term
-        # var division term
-        var_division = torch.sum(posterior_variance / prior_variance, dim=1)
-        # diff means term
-        diff_means = prior_mean - posterior_mean
-        diff_term = torch.sum(
-            (diff_means * diff_means) / prior_variance, dim=1)
-        # logvar det division term
-        logvar_det_division = \
-            prior_variance.log().sum() - posterior_log_variance.sum(dim=1)
-        # combine terms
-        KL = 0.5 * (
-            var_division + diff_term - self.n_components + logvar_det_division)
-
-        # Reconstruction term
-        RL = -torch.sum(inputs * torch.log(word_dists + 1e-10), dim=1)
-
-        #loss = self.weights["beta"]*KL + RL
-
-        return KL, RL
-
     def forward(
             self,
             input_ids=None,
             src_bow_global=None,
             ext_labels=None,
             section_scores=None,
+            sum_sents_labels=None,
             section_len=None,
             attention_mask=None,
             decoder_input_ids=None,
@@ -1433,6 +1410,8 @@ class TGSumForConditionalGeneration(LEDForConditionalGeneration, GenerationMixin
         Returns:
         """
         # self.set_split_noise(split_noise)
+        import pdb;pdb.set_trace()
+
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # return_dict = True
 

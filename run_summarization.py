@@ -242,7 +242,7 @@ class DataTrainingArguments:
         },
     )
     max_target_length: Optional[int] = field(
-        default=150,
+        default=256,
         metadata={
             "help": (
                 "The maximum total sequence length for target text after tokenization. Sequences longer "
@@ -473,53 +473,55 @@ def main():
     # config.gradient_checkpointing = True
     #TGSumTokenizer
 
-    # abs_tokenizer = TGSumTokenizer.from_pretrained(
-    #     model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-    #     cache_dir=model_args.cache_dir,
-    #     use_fast=model_args.use_fast_tokenizer,
-    #     revision=model_args.model_revision,
-    #     use_auth_token=True if model_args.use_auth_token else None,
-    # )
-    abs_tokenizer = LEDTokenizer.from_pretrained(
+    abs_tokenizer = TGSumTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         use_fast=model_args.use_fast_tokenizer,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-
-    #TGSumForConditionalGeneration
-    # model, loading_info = TGSumForConditionalGeneration.from_pretrained(
-    #     model_args.model_name_or_path,
-    #     from_tf=bool(".ckpt" in model_args.model_name_or_path),
-    #     use_topic=True,
-    #     is_test=bool( model_args.mode == "test" ),
-    #     config=config,
+    # abs_tokenizer = LEDTokenizer.from_pretrained(
+    #     model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
     #     cache_dir=model_args.cache_dir,
+    #     use_fast=model_args.use_fast_tokenizer,
     #     revision=model_args.model_revision,
     #     use_auth_token=True if model_args.use_auth_token else None,
     # )
-    model = LEDForConditionalGeneration.from_pretrained(
+
+    #TGSumForConditionalGeneration
+    model, loading_info = TGSumForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        use_topic=True,
+        is_test=bool( model_args.mode == "test" ),
         config=config,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+    # model = LEDForConditionalGeneration.from_pretrained(
+    #     model_args.model_name_or_path,
+    #     from_tf=bool(".ckpt" in model_args.model_name_or_path),
+    #     config=config,
+    #     cache_dir=model_args.cache_dir,
+    #     revision=model_args.model_revision,
+    #     use_auth_token=True if model_args.use_auth_token else None,
+    # )
 
     model.config = config
 
     # add <sect> labels...
-    # special_tokens_dict = {'additional_special_tokens': ['<sect>', '</sect>']}
-    # tokenizer.add_special_tokens(special_tokens_dict)
+    special_tokens_dict = {'additional_special_tokens': ['<sect>', '</sect>', '<SUMMSENT>']}
+    abs_tokenizer.add_special_tokens(special_tokens_dict)
+    # abs_tokenizer.add_tokens()
+    # abs_tokenizer.convert_tokens_to_ids(['<sect>'])
     # intialize word embeddings...
-
     if model_args.mode != 'test':
         model.resize_token_embeddings(len(abs_tokenizer))
         model.led.shared.weight.requires_grad = False
-        model.led.shared.weight[-1, :] = model.led.shared.weight[2, :]
-        model.led.shared.weight[-2, :] = model.led.shared.weight[0, :]
+        model.led.shared.weight[-2, :] = model.led.shared.weight[2, :]
+        model.led.shared.weight[-3, :] = model.led.shared.weight[0, :]
+        model.led.shared.weight[-1, :] = model.led.shared.weight[4, :] # "." is initialized for the end of sentence
         model.led.shared.weight.requires_grad = True
 
 
@@ -618,85 +620,137 @@ def main():
             f"`{model.__class__.__name__}`. This will lead to loss being calculated twice and will take up more memory"
         )
 
+    def preprocess_function(examples):
+        # remove pairs where at least one record is None
+        inputs, targets, src_ids, tgt_ids, topic_info_global, topic_info_section, ext_labels, section_scores, \
+        headings, inputs_tokenized, target_tokenized, sum_sents_labels =[], [], [], [], [], [], [], [], [], [], [], []
+        sum_sents_labels_all = []
+        # Retrieving labels for writing each summary sentence...
+        # examples['sum_sent_labels'][i] = [ [ [sent_1_labels], [sent_2_labels], [...], [] ], [] ]
+        #
+        #
+        #
+
+        # ( number_of_summaries, number_of_summary_sentences, number of source sentences[0,1] )
+        for i in range(len(examples[text_column])):
+            if examples[text_column][i] is not None and examples[summary_column][i] is not None:
+                input_sents = []
+
+                num_sents = 0
+                input_sents_tokenized = []
+                section_heading = []
+                for sect in examples[text_column][i]:
+                    sent_sects = []
+                    for sent in sect:
+                        sent_sects.append(sent.replace(' </s>', '').replace(' <s>', '').replace(' <mask>', '') \
+                              .replace('<s>', '').replace('</s>', '').replace('<mask>', '') \
+                              .replace('\n', ' ').strip().lower())
+                    num_sents += len(sent_sects)
+                    input_sents.append(' <SENTTT> '.join(sent_sects.copy()))
+
+                for sect in examples[text_column + '_tokenized'][i]:
+                    sent_sects = []
+                    for sent in sect:
+                        sent_sects.append(sent)
+
+                    input_sents_tokenized.append(sent_sects.copy())
+
+                section_heading.append([e.split(' <COMBINED> ') for e in examples['section_headings'][i]])
+                headings.append(section_heading)
+                inputs.append(input_sents)
+
+
+                ####################
+                ####################
+                ####################
+                ### sample ext labels ...
+                ## num_of_sects, num_of_summaries, num_of_summary_sentences, 0,1 labels
+
+                # for jsect, sect in enumerate(examples['ext_labels'][i]):
+                #     sum_sents_labels_signle_1 = []
+                #     for jsum, sum in enumerate(examples[summary_column][i]):
+                #         sum_sents_labels_signle = []
+                #         for _ in sum:
+                #             sum_sents_labels_signle.append(examples["ext_labels"][i][jsect][jsum])
+                #         sum_sents_labels_signle_1.append(sum_sents_labels_signle)
+                #     sum_sents_labels.append(sum_sents_labels_signle_1)
+
+                # examples['sum_sent_labels'][i] = sum_sents_labels
+                # sum_sents_labels_all.append(sum_sents_labels)
+                sum_sents_labels_all.append(examples["ext_labels_summ_sents"][i])
+
+                ####################
+                ####################
+                ####################
+
+                inputs_tokenized.append(input_sents_tokenized)
+                src_ids.append(examples["paper_id"][i])
+
+                ext_labels.append(examples["ext_labels"][i])
+                valid_targets = [j for j, e in enumerate(examples[summary_column][i])]
+
+                targets.extend([e for j, e in enumerate(examples[summary_column][i]) if j in valid_targets])
+                # target_tokenized.append([e.strip().lower() for j, e in enumerate(examples[summary_column][i]) if j in valid_targets])
+                tgt_ids.extend(len(valid_targets) * [examples["paper_id"][i]])
+
+        model_inputs = abs_tokenizer(
+            inputs,
+            # inputs_tokenized=inputs_tokenized,
+            # target_tokenized=target_tokenized,
+            topic_file_path=data_args.topic_file_path,
+            max_length=data_args.max_source_length,
+            padding=padding,
+            truncation=True,
+            doc_ids=src_ids,
+            section_headings=headings,
+            ext_labels=ext_labels,
+            sum_sents_labels=sum_sents_labels_all,
+            section_scores=section_scores,
+            labeling=model_args.labeling,
+         )
+
+        # Setup the tokenizer for targets
+        with abs_tokenizer.as_target_tokenizer():
+            labels = abs_tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True, doc_ids=['tgt-'+t for t in tgt_ids],is_target=True)
+
+
+        # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
+        # padding in the loss.
+        if padding == "max_length" and data_args.ignore_pad_token_for_loss:
+            labels["input_ids"] = [
+                [(l if l != abs_tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+            ]
+        model_inputs["attention_mask"] = model_inputs.attention_mask
+
+        # create 0 global_attention_mask lists
+        model_inputs["global_attention_mask"] = []
+
+        for att_mask in model_inputs["attention_mask"]:
+            model_inputs["global_attention_mask"].append([0] * len(att_mask))
+
+
+        # since above lists are references, the following line changes the 0 index for all samples
+        model_inputs["global_attention_mask"][0][0] = 1
+
+        model_inputs = _combine_model_inputs(model_inputs, labels, tgt_ids, targets)
+        # model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
     # def preprocess_function(examples):
     #     # remove pairs where at least one record is None
-    #     inputs, targets, src_ids, tgt_ids, topic_info_global, topic_info_section, ext_labels, section_scores, \
-    #     headings, inputs_tokenized,target_tokenized =[], [], [], [], [], [], [], [], [], [], []
+    #     inputs, targets = [], []
+    #     import pdb;pdb.set_trace()
     #     for i in range(len(examples[text_column])):
-    #         if examples[text_column][i] is not None and examples[summary_column][i] is not None:
-    #             input_sents = []
-    #             input_sents_tokenized = []
-    #             section_heading = []
-    #             for sect in examples[text_column][i]:
-    #                 sent_sects = []
-    #                 for sent in sect:
-    #                     sent_sects.append(sent.replace(' </s>', '').replace(' <s>', '').replace(' <mask>', '') \
-    #                           .replace('<s>', '').replace('</s>', '').replace('<mask>', '') \
-    #                           .replace('\n', ' ').strip().lower())
-    #                 input_sents.append(' <SENTTT> '.join(sent_sects.copy()))
+    #         if examples[text_column][i] and examples[summary_column][i]:
+    #             inputs.append(' '.join(sum(examples[text_column][i], [])))
+    #             targets.append(examples[summary_column][i][0])
     #
-    #             for sect in examples[text_column + '_tokenized'][i]:
-    #                 sent_sects = []
-    #                 for sent in sect:
-    #                     sent_sects.append(sent)
-    #
-    #                 input_sents_tokenized.append(sent_sects.copy())
-    #
-    #             section_heading.append([e.split(' <COMBINED> ') for e in examples['section_headings'][i]])
-    #             headings.append(section_heading)
-    #             inputs.append(input_sents)
-    #             inputs_tokenized.append(input_sents_tokenized)
-    #             src_ids.append(examples["paper_id"][i])
-    #             # if examples["paper_id"][i] == "SP:bd9472600b9e7e4b407b0b2572179bc8cab7f272":
-    #             #     import pdb;pdb.set_trace()
-    #             topic_info_global.append(json.loads(examples["topic_info_global"][i]))
-    #             # topic_info_section.append(json.loads(examples["topic_info_section"][i]))
-    #             ext_labels.append(examples["ext_labels"][i])
-    #             section_scores.append(examples["section_scores"][i])
-    #
-    #             valid_targets = [j for j, e in enumerate(examples[summary_column][i]) if len(e.strip())>0]
-    #
-    #             targets.extend([e.strip().lower() for j, e in enumerate(examples[summary_column][i]) if j in valid_targets])
-    #             target_tokenized.append([e.strip().lower() for j, e in enumerate(examples[summary_column][i]) if j in valid_targets])
-    #             tgt_ids.extend(len(valid_targets) * [examples["paper_id"][i]])
-    #
-    #     topic_info_tuple = {"topic_info_global": topic_info_global}
-    #
-    #     # ext_model_inputs = ext_tokenizer(
-    #     #     inputs,
-    #     #     # inputs_tokenized=inputs_tokenized,
-    #     #     # target_tokenized=target_tokenized,
-    #     #     max_length=data_args.max_source_length,
-    #     #     padding=padding,
-    #     #     truncation=True,
-    #     #     doc_ids=src_ids,
-    #     #     section_headings=headings,
-    #     #     topic_info_tuple=topic_info_tuple,
-    #     #     ext_labels=ext_labels,
-    #     #     section_scores=section_scores,
-    #     #     labeling=model_args.labeling,
-    #     #  )
-    #
-    #     model_inputs = abs_tokenizer(
-    #         inputs,
-    #         # inputs_tokenized=inputs_tokenized,
-    #         # target_tokenized=target_tokenized,
-    #         topic_file_path=data_args.topic_file_path,
-    #         max_length=data_args.max_source_length,
-    #         padding=padding,
-    #         truncation=True,
-    #         doc_ids=src_ids,
-    #         section_headings=headings,
-    #         topic_info_tuple=topic_info_tuple,
-    #         ext_labels=ext_labels,
-    #         section_scores=section_scores,
-    #         labeling=model_args.labeling,
-    #      )
+    #     inputs = [prefix + inp for inp in inputs]
+    #     model_inputs = abs_tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
     #
     #     # Setup the tokenizer for targets
     #     with abs_tokenizer.as_target_tokenizer():
-    #         labels = abs_tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True, doc_ids=['tgt-'+t for t in tgt_ids],is_target=True)
-    #
+    #         labels = abs_tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True)
     #
     #     # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
     #     # padding in the loss.
@@ -705,45 +759,8 @@ def main():
     #             [(l if l != abs_tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
     #         ]
     #
-    #     model_inputs["attention_mask"] = model_inputs.attention_mask
-    #
-    #     # create 0 global_attention_mask lists
-    #     model_inputs["global_attention_mask"] = len(model_inputs["input_ids"]) * [
-    #         [0 for _ in range(len(model_inputs["attention_mask"][0]))]
-    #     ]
-    #
-    #     # since above lists are references, the following line changes the 0 index for all samples
-    #     model_inputs["global_attention_mask"][0][0] = 1
-    #
-    #     model_inputs = _combine_model_inputs(model_inputs, labels, tgt_ids, targets)
-    #
-    #     # model_inputs["labels"] = labels["input_ids"]
+    #     model_inputs["labels"] = labels["input_ids"]
     #     return model_inputs
-
-    def preprocess_function(examples):
-        # remove pairs where at least one record is None
-        inputs, targets = [], []
-        for i in range(len(examples[text_column])):
-            if examples[text_column][i] and examples[summary_column][i]:
-                inputs.append(' '.join(sum(examples[text_column][i], [])))
-                targets.append(examples[summary_column][i][0])
-
-        inputs = [prefix + inp for inp in inputs]
-        model_inputs = abs_tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
-
-        # Setup the tokenizer for targets
-        with abs_tokenizer.as_target_tokenizer():
-            labels = abs_tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True)
-
-        # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
-        # padding in the loss.
-        if padding == "max_length" and data_args.ignore_pad_token_for_loss:
-            labels["input_ids"] = [
-                [(l if l != abs_tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
-            ]
-
-        model_inputs["labels"] = labels["input_ids"]
-        return model_inputs
 
     if training_args.do_train:
         if "train" not in raw_datasets:
@@ -820,11 +837,16 @@ def main():
     metrics = ['rouge1', 'rouge2', 'rougeL']
     scorer = rouge_scorer.RougeScorer(metrics, use_stemmer=True)
 
-    def postprocess_text(preds):
-        preds = [pred.strip() for pred in preds]
-
-        # rougeLSum expects newline after each sentence
-        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+    def postprocess_text(preds, is_sum=False):
+        if not is_sum:
+            try:
+                preds = [pred.strip() for pred in preds]
+            except:
+                import pdb;pdb.set_trace()
+            # rougeLSum expects newline after each sentence
+            preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+        else:
+            preds = ["\n".join(pred).strip() for pred in preds]
 
         return preds
 
@@ -871,7 +893,7 @@ def main():
         val_paper_summaries = []
 
         for summs in val_dataset['summary']:
-            val_paper_summaries.append(postprocess_text(summs))
+            val_paper_summaries.append(postprocess_text(summs, is_sum=True))
 
         p_ids, decoded_preds_all, decoded_labels_all = combinte_predictions_labels(
                                                         {k: v for k, v in zip(doc_ids, decoded_preds)},
@@ -1031,25 +1053,25 @@ def main():
     #     wb_logger=None
 
     # Initialize our Trainer
-    # trainer = TGSumTrainer(
-    #     model=model,
-    #     args=training_args,
-    #     loading_info=loading_info,
-    #     train_dataset=train_dataset if training_args.do_train else None,
-    #     eval_dataset=eval_dataset if training_args.do_eval else None,
-    #     tokenizer=abs_tokenizer,
-    #     data_collator=data_collator,
-    #     compute_metrics=compute_metrics if training_args.predict_with_generate else None,
-    # )
-    trainer = Seq2SeqTrainer(
+    trainer = TGSumTrainer(
         model=model,
         args=training_args,
+        loading_info=loading_info,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=abs_tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
     )
+    # trainer = Seq2SeqTrainer(
+    #     model=model,
+    #     args=training_args,
+    #     train_dataset=train_dataset if training_args.do_train else None,
+    #     eval_dataset=eval_dataset if training_args.do_eval else None,
+    #     tokenizer=abs_tokenizer,
+    #     data_collator=data_collator,
+    #     compute_metrics=compute_metrics if training_args.predict_with_generate else None,
+    # )
 
     # Training
     if training_args.do_train:

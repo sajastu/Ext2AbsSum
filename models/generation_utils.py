@@ -168,49 +168,38 @@ class GenerationMixin(GenerationMixin):
 
 
     def _prepare_encoder_decoder_kwargs_for_generation(
-        self, inputs_tensor: torch.Tensor, section_token_index=None, model_kwargs=None, model_input_name: Optional[str] = None
+        self, inputs_tensor: torch.Tensor, section_token_index=None, model_kwargs=None, model_input_name: Optional[str]=None, first=False,
     ) -> Dict[str, Any]:
         # 1. get encoder
-        encoder = self.get_encoder()
-        topic_model = self.get_topic_model()
-        fusing_function = self.get_topic_fuse()
 
+        if "encoder_outputs" not in model_kwargs:
 
-        # 2. prepare encoder args and encoder kwargs from model kwargs
-        irrelevant_prefix = ["decoder_", "cross_attn", "use_cache", "src_bow_global", "ext_labels", "section_token_index", "section_scores", "section_len"]
+            encoder = self.get_encoder()
+            # 2. prepare encoder args and encoder kwargs from model kwargs
+            irrelevant_prefix = ["decoder_", "cross_attn", "use_cache", "src_bow_global", "ext_labels", "section_token_index", "section_scores", "section_len"]
 
-        encoder_kwargs = {
-            argument: value
-            for argument, value in model_kwargs.items()
-            if not any(argument.startswith(p) for p in irrelevant_prefix)
-        }
+            encoder_kwargs = {
+                argument: value
+                for argument, value in model_kwargs.items()
+                if not any(argument.startswith(p) for p in irrelevant_prefix)
+            }
 
+            # 3. make sure that encoder returns `ModelOutput`
+            model_input_name = model_input_name if model_input_name is not None else self.main_input_name
+            encoder_kwargs["return_dict"] = True
+            encoder_kwargs[model_input_name] = inputs_tensor
+            model_kwargs["encoder_outputs"]: ModelOutput = encoder(**encoder_kwargs)
 
+        if first:
+            # only pick out abstract and intro
+            sect_idx = ((inputs_tensor[0] == 50265).nonzero(as_tuple=True)[0])
+            try:
+                model_kwargs["reduced_encodings"] = model_kwargs["encoder_outputs"][0][0][:sect_idx[2]].unsqueeze(0)
+            except:
+                # the instance has two sections
+                model_kwargs["reduced_encodings"] = model_kwargs["encoder_outputs"][0]
 
-        # 3. make sure that encoder returns `ModelOutput`
-        model_input_name = model_input_name if model_input_name is not None else self.main_input_name
-        encoder_kwargs["return_dict"] = True
-        encoder_kwargs[model_input_name] = inputs_tensor
-
-        # import pdb;pdb.set_trace()
-        model_kwargs["encoder_outputs"]: ModelOutput = encoder(**encoder_kwargs)
-        section_pre_encodings = torch.index_select(model_kwargs["encoder_outputs"][0], 1,section_token_index.cuda()).cuda()
-        model_kwargs["topic_model_global_outputs"] = topic_model(model_kwargs['src_bow_global'], section_pre_encodings.mean(dim=1))
-        model_kwargs["encoder_outputs"].last_hidden_state = fusing_function(model_kwargs["topic_model_global_outputs"][-1], encoder_kwargs['attention_mask'].size(1), model_kwargs["encoder_outputs"].last_hidden_state )
-        model_kwargs["sections_sentence_encoding"], model_kwargs["selected_sent_embeddings"] = self._prepare_reduced_encoder_outputs(model_kwargs["encoder_outputs"],
-                                                                                                                                     encoder_kwargs['input_ids'],
-                                                                                                                                     model_kwargs['section_len'],
-                                                                                                 )
-
-        # prepare sentence embeddings
-
-
-        # import pdb;pdb.set_trace()
-
-
-        # model_kwargs["topic_model_section_outputs"] = topic_model(model_kwargs['src_bow_section'].squeeze(0), section_pre_encodings.squeeze(0))
-        # gen_mask = torch.BoolTensorTensor([True] * section_pre_encodings.size(1)).unsqueeze(0).cuda()
-        # model_kwargs["encoder_outputs_section"]: ModelOutput = encoder_section(model_kwargs["selected_sent_embeddings"])
+            model_kwargs["reduced_encodings_mask"] = torch.ones(model_kwargs["reduced_encodings"].shape[0], model_kwargs["reduced_encodings"].shape[1]).cuda()
 
         return model_kwargs
 
@@ -220,7 +209,9 @@ class GenerationMixin(GenerationMixin):
             expand_size: int = 1,
             is_encoder_decoder: bool = False,
             attention_mask: Optional[torch.LongTensor] = None,
+            reduced_encodings_mask: Optional[torch.LongTensor] = None,
             encoder_outputs: Optional[ModelOutput] = None,
+            reduced_encodings: Optional[ModelOutput] = None,
             encoder_outputs_section: Optional[ModelOutput] = None,
             selected_sent_embeddings: Optional[ModelOutput] = None,
             sections_sentence_encoding: Optional[ModelOutput] = None,
@@ -230,11 +221,6 @@ class GenerationMixin(GenerationMixin):
             torch.arange(input_ids.shape[0]).view(-1, 1).repeat(1, expand_size).view(-1).to(input_ids.device)
         )
         input_ids = input_ids.index_select(0, expanded_return_idx)
-
-        if "src_bow_global" in model_kwargs:
-            src_bow = model_kwargs["src_bow_global"]
-            model_kwargs["src_bow_global"] = src_bow.index_select(0, expanded_return_idx)
-
 
         if "token_type_ids" in model_kwargs:
             token_type_ids = model_kwargs["token_type_ids"]
@@ -252,11 +238,16 @@ class GenerationMixin(GenerationMixin):
             model_kwargs["encoder_outputs"] = encoder_outputs[0].index_select(
                 0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device))
 
-            model_kwargs["selected_sent_embeddings"] = selected_sent_embeddings.index_select(
-                0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device))
+            model_kwargs["reduced_encodings"] = reduced_encodings.index_select(
+                0, expanded_return_idx.to(reduced_encodings_mask.device))
+            model_kwargs["reduced_encodings_mask"] = reduced_encodings_mask.index_select(
+                0, expanded_return_idx.to(reduced_encodings_mask.device))
 
-            model_kwargs["sections_sentence_encoding"] = sections_sentence_encoding.index_select(
-                0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device))
+            # model_kwargs["selected_sent_embeddings"] = selected_sent_embeddings.index_select(
+            #     0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device))
+
+            # model_kwargs["sections_sentence_encoding"] = sections_sentence_encoding.index_select(
+            #     0, expanded_return_idx.to(encoder_outputs.last_hidden_state.device))
 
         return input_ids, model_kwargs
 
@@ -308,10 +299,8 @@ class GenerationMixin(GenerationMixin):
             exponential_decay_length_penalty: Optional[Tuple[Union[int, float]]] = None,
             **model_kwargs,
     ) -> Union[GreedySearchOutput, SampleOutput, BeamSearchOutput, BeamSampleOutput, torch.LongTensor]:
-        if 'summ_bow' in model_kwargs.keys():
-            model_kwargs['summ_bow'] = None
 
-
+        sent_boundaries = ((inputs[0] == 0).nonzero(as_tuple=True)[0], (inputs[0] == 2).nonzero(as_tuple=True)[0])
 
         # 1. Set generation parameters if not already defined
         bos_token_id = bos_token_id if bos_token_id is not None else self.config.bos_token_id
@@ -356,9 +345,8 @@ class GenerationMixin(GenerationMixin):
         model_kwargs["output_attentions"] = output_attentions
         model_kwargs["output_hidden_states"] = output_hidden_states
         model_kwargs["use_cache"] = use_cache
-        model_kwargs["src_bow_global"] = src_bow_global
         model_kwargs["ext_labels"] = ext_labels
-        model_kwargs["section_scores"] = section_scores
+        # model_kwargs["section_scores"] = section_scores
         # model_kwargs["doc_ids"] = doc_ids
 
         accepts_attention_mask = "attention_mask" in set(inspect.signature(self.forward).parameters.keys())
@@ -373,7 +361,7 @@ class GenerationMixin(GenerationMixin):
             # if model is encoder decoder encoder_outputs are created
             # and added to `model_kwargs`
 
-            model_kwargs = self._prepare_encoder_decoder_kwargs_for_generation(inputs_tensor, section_token_index, model_kwargs, model_input_name)
+            model_kwargs = self._prepare_encoder_decoder_kwargs_for_generation(inputs_tensor, section_token_index, model_kwargs, model_input_name, first=True)
 
 
         # 4. Prepare `input_ids` which will be used for auto-regressive generation
@@ -402,8 +390,6 @@ class GenerationMixin(GenerationMixin):
             )
         # default to config if still None
         max_length = max_length if max_length is not None else self.config.max_length
-        # max_length = 500
-        # min_length = 400
 
         if input_ids.shape[-1] >= max_length:
             input_ids_string = "decoder_input_ids" if self.config.is_encoder_decoder else "input_ids"
@@ -415,8 +401,8 @@ class GenerationMixin(GenerationMixin):
         # 6. determine generation mode
         num_beams = 5
         no_repeat_ngram_size = 3
-        max_length = 150
-        min_length = 100
+        max_length = 256
+        min_length = 50
         length_penalty = 1.0
         early_stopping = True
         is_beam_gen_mode = (num_beams > 1) and (num_beam_groups == 1) and do_sample is False and constraints is None
@@ -478,7 +464,6 @@ class GenerationMixin(GenerationMixin):
             )
 
             # 11. interleave input_ids with `num_beams` additional sequences per batch
-            model_kwargs["src_bow_global"] = src_bow_global
 
             input_ids, model_kwargs = self._expand_inputs_for_generation(
                 input_ids, expand_size=num_beams, is_encoder_decoder=self.config.is_encoder_decoder, **model_kwargs
@@ -489,6 +474,7 @@ class GenerationMixin(GenerationMixin):
             return self.beam_search(
                 input_ids,
                 beam_scorer,
+                sent_boundaries=sent_boundaries,
                 section_token_index=section_token_index,
                 logits_processor=logits_processor,
                 stopping_criteria=stopping_criteria,
@@ -505,6 +491,7 @@ class GenerationMixin(GenerationMixin):
         self,
         input_ids: torch.LongTensor,
         beam_scorer: BeamScorer,
+        sent_boundaries=None,
         section_token_index= None,
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
@@ -573,6 +560,7 @@ class GenerationMixin(GenerationMixin):
 
         this_peer_finished = False  # used by synced_gpus only
 
+
         while True:
 
             if synced_gpus:
@@ -587,8 +575,6 @@ class GenerationMixin(GenerationMixin):
             # import pdb;pdb.set_trace()
 
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-
-            # model_inputs['src_bow'] = src_bow
             # import pdb;
             # pdb.set_trace()
 
@@ -599,25 +585,11 @@ class GenerationMixin(GenerationMixin):
                 output_hidden_states=output_hidden_states,
             )
 
-            # mask = model_kwargs['attention_mask']
-            # if cur_len == 2:
-            #     for beam_idx in range(mask.shape[0]):
-            #         truncated_idx = mask.sum(dim=1).cpu().numpy()
-            #         attention_output_lst[beam_idx].append(np.zeros((1, truncated_idx[beam_idx])))
-
-            # else:
-            # attentions = outputs['cross_attentions'][-1].mean(dim=1).cpu().numpy()
-            # for beam_idx in range(attentions.shape[0]):
-            #     truncated_idx = mask.sum(dim=1).cpu().numpy()
-            #     attention_output_lst[beam_idx].append(attentions[beam_idx][0][:truncated_idx[beam_idx]])
-
             if synced_gpus and this_peer_finished:
                 cur_len = cur_len + 1
                 continue  # don't waste resources running the code we don't need
 
             next_token_logits = outputs.logits[:, -1, :]
-            # hack: adjust tokens for Marian. For Marian we have to make sure that the `pad_token_id`
-            # cannot be generated both before and after the `nn.functional.log_softmax` operation.
             next_token_logits = self.adjust_logits_during_generation(next_token_logits, cur_len=cur_len)
             next_token_scores = nn.functional.log_softmax(
                 next_token_logits, dim=-1
@@ -671,7 +643,63 @@ class GenerationMixin(GenerationMixin):
             beam_next_tokens = beam_outputs["next_beam_tokens"]
             beam_idx = beam_outputs["next_beam_indices"]
 
+            nxt_token = beam_next_tokens.unsqueeze(-1)
+            # mask_swch = (nxt_token == 50267)
+            mask_swch = (nxt_token == 50267)
+            if mask_swch.sum() > 0:
+                # import pdb;pdb.set_trace()
+                # print(cur_len)
+                # EOS is detected in some indices
+                # should update 'reduced_encodings' keys of the detected indices
+                swch_indx = ((mask_swch.squeeze(-1) == True).nonzero(as_tuple=True)[0])
+                # nonSwth__indx = ((mask_swch.squeeze(-1) == False).nonzero(as_tuple=True)[0])
+                switch_partial_encodings = outputs.decoder_last_hidden_states[swch_indx, :, :]
+                input_ids_swch = input_ids[swch_indx, :]
+
+                switch_encoder_outputs = model_kwargs['encoder_outputs'][swch_indx, :, :]
+                # nonSwitch_encoder_outputs = model_kwargs['reduced_encodings'][nonSwth__indx, :, :]
+
+                combiner_mask = torch.zeros_like(input_ids_swch)
+                combiner_mask[combiner_mask!=1] = 1
+                # combiner_mask = torch.stack(combiner_mask_lst, dim=2).view(decoder_input_ids.shape[0], -1)
+                combiner_mask = combiner_mask[:, None, None, :].repeat(1, 1, switch_encoder_outputs.shape[1], 1)
+                # updating reduced_encodings of the changed indices...
+                combiner = self.get_combiner()
+                encoder_outputs_x, cross_attn_weights_word, cross_attn_present_key_value_word = combiner(hidden_states=switch_encoder_outputs, key_value_states=switch_partial_encodings, attention_mask=combiner_mask)
+                extractor = self.get_extractor()
+                updated_rows_reduced_encodings, updated_rows_reduced_encodings_mask, updated_rows_sent_scores = extractor(encoder_outputs_x, sent_boundaries, LIMIT=1024)
+
+                bs_old, seq_len_old, dim = model_kwargs['reduced_encodings'].shape
+                bs_updated, seq_len_updated, _ = updated_rows_reduced_encodings.shape
+                if seq_len_updated > seq_len_old:
+                    # pad the old reduced encodings and put updated_rows instead.
+                    model_kwargs['reduced_encodings'] = torch.cat((model_kwargs['reduced_encodings'], torch.ones(bs_old, seq_len_updated-seq_len_old, dim).cuda()), dim=1)
+                    model_kwargs['reduced_encodings_mask'] = torch.cat((model_kwargs['reduced_encodings_mask'], torch.zeros(bs_old, seq_len_updated-seq_len_old).cuda()), dim=1)
+                    # cid = 0
+                    # for indx_updated in swch_indx:
+                    #     model_kwargs['reduced_encodings'][indx_updated] = updated_rows_reduced_encodings[cid]
+                    #     model_kwargs['reduced_encodings_mask'][indx_updated] = updated_rows_reduced_encodings_mask[cid]
+                    #     cid +=1
+
+                else:
+                    # pad the updated_rows and then put into the old reduced_encod
+                    updated_rows_reduced_encodings = torch.cat((updated_rows_reduced_encodings, torch.ones(bs_updated, seq_len_old-seq_len_updated, dim).cuda()), dim=1)
+                    updated_rows_reduced_encodings_mask = torch.cat((updated_rows_reduced_encodings_mask, torch.zeros(bs_updated, seq_len_old-seq_len_updated).cuda()), dim=1)
+
+                # now replacing
+                cid = 0
+                for indx_updated in swch_indx:
+                    model_kwargs['reduced_encodings'][indx_updated] = updated_rows_reduced_encodings[cid]
+                    model_kwargs['reduced_encodings_mask'][indx_updated] = updated_rows_reduced_encodings_mask[cid]
+                    cid += 1
+
+
             input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
+
+
+            # mask_swch_row, mask_swch_col = torch.where(input_ids)
+            # input_ids[input_ids==50267]
+            # (50267 in input_ids)
 
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
@@ -684,11 +712,6 @@ class GenerationMixin(GenerationMixin):
 
             # increase cur_len
             cur_len = cur_len + 1
-
-
-
-            # if len(attention_output_lst[0]) != input_ids.shape[1]:
-            #     import pdb;pdb.set_trace()
 
             if beam_scorer.is_done or stopping_criteria(input_ids, scores):
                 if not synced_gpus:

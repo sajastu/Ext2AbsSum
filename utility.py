@@ -36,7 +36,6 @@ def _get_word_ngrams(n, sentences):
 
 
 def _combine_model_inputs(model_inputs, labels, tgt_doc_ids, targets):
-
     paper_label_ids = {}
     for label_id, paper_id, tgt in zip(labels["input_ids"], tgt_doc_ids, targets):
         # if label_id[0] == -100:
@@ -50,23 +49,6 @@ def _combine_model_inputs(model_inputs, labels, tgt_doc_ids, targets):
 
     for paper_id in model_inputs['doc_ids']:
         model_inputs["labels"].append(paper_label_ids[paper_id])
-
-    # import pdb;pdb.set_trace()
-    # debugging
-    # new_model_inputs = {}
-    # for k in model_inputs.keys():
-    #     new_model_inputs[k] = []
-    # for j, val in enumerate(model_inputs['labels']):
-    #     if len(val) > 1:
-    #         keys = model_inputs.keys()
-    #         for k in keys:
-    #             if len(new_model_inputs[k]) == 0:
-    #                 new_model_inputs[k] = [model_inputs[k][j]]
-    #             else:
-    #                 new_model_inputs[k].append(model_inputs[k][j])
-    #
-    # model_inputs = new_model_inputs
-    # debugging done
 
     return model_inputs
 
