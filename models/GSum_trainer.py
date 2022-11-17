@@ -309,12 +309,15 @@ class TGSumTrainer(Seq2SeqTrainer):
                 self._load_rng_state(resume_from_checkpoint)
 
             step = -1
+            # steps_trained_progress_bar = tqdm(total=steps_trained_in_current_epoch)
+
             for step, inputs in enumerate(epoch_iterator):
                 # import pdb;pdb.set_trace()
-                # if step < 1380:
+                # if step < 1190:
                 #     continue
                 # else:
-                #     steps_trained_progress_bar.update(step)
+                #     if steps_trained_progress_bar is not None:
+                #         steps_trained_progress_bar.update(step)
 
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
@@ -356,7 +359,10 @@ class TGSumTrainer(Seq2SeqTrainer):
                     lm_tr_loss += lm_tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
                 else:
                     tr_loss += tr_loss_step
-                    sent_loss += sent_loss_step
+                    try:
+                        sent_loss += sent_loss_step
+                    except:
+                        import pdb;pdb.set_trace()
                     # sect_loss += sect_loss_step
                     # topic_tr_loss += topic_loss_step
                     lm_tr_loss += lm_loss_step
@@ -503,14 +509,14 @@ class TGSumTrainer(Seq2SeqTrainer):
             logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
 
             # if self.is_topic_task():
-            logs["topic_loss"] = round(tp_tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+            # logs["topic_loss"] = round(tp_tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
 
             # if self.is_all_task():
             logs["lm_loss"] = round(lm_tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
 
             # if self.is_ext_task():
             logs["sent_loss"] = round(sent_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 6)
-            logs["sect_loss"] = round(sect_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 6)
+            # logs["sect_loss"] = round(sect_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 6)
 
             logs["learning_rate"] = self._get_learning_rate()
 
@@ -526,13 +532,15 @@ class TGSumTrainer(Seq2SeqTrainer):
             self.log(logs)
 
         metrics = None
+        # first save then eval
+        if self.control.should_save:
+            self._save_checkpoint(model, trial, metrics=metrics)
+            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+
         if self.control.should_evaluate:
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
             self._report_to_hp_search(trial, epoch, metrics)
 
-        if self.control.should_save:
-            self._save_checkpoint(model, trial, metrics=metrics)
-            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
         """
@@ -555,14 +563,16 @@ class TGSumTrainer(Seq2SeqTrainer):
 
         with self.compute_loss_context_manager():
             loss, sent_loss = self.compute_loss(model, inputs)
+        lm_loss = loss
 
-
+        if sent_loss is not None:
+            loss = (0.8 * loss) + (0.2 * sent_loss)
+        else:
+            loss = 0.8 * loss
         ## combine losses
         # import pdb;
         # pdb.set_trace()
 
-        lm_loss = loss
-        loss = (0.8 * loss) + (0.2*sent_loss)
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -575,7 +585,8 @@ class TGSumTrainer(Seq2SeqTrainer):
             loss = loss / self.args.gradient_accumulation_steps
             # topic_loss = topic_loss / self.args.gradient_accumulation_steps
             # sect_loss = sect_loss / self.args.gradient_accumulation_steps
-            sent_loss = sent_loss / self.args.gradient_accumulation_steps
+            if sent_loss is not None:
+                sent_loss = sent_loss / self.args.gradient_accumulation_steps
 
         if self.do_grad_scaling:
             self.scaler.scale(loss).backward()
@@ -584,9 +595,14 @@ class TGSumTrainer(Seq2SeqTrainer):
             #     import pdb;pdb.set_trace()
             loss.backward()
 
+        # try:
+            # sent_loss.detach()
+        # except:
+        #     import pdb;pdb.set_trace()
+
         return loss.detach(), \
                lm_loss.detach(), \
-               sent_loss.detach()
+               sent_loss.detach() if sent_loss is not None else torch.Tensor([0])[0].cuda()
                # sect_loss.detach(), \
                # topic_loss.detach(), \
 
@@ -792,6 +808,7 @@ class TGSumTrainer(Seq2SeqTrainer):
             self.callback_handler.eval_dataloader = dataloader
             # Do this before wrapping.
             eval_dataset = dataloader.dataset
+
             if is_torch_tpu_available():
                 dataloader = pl.ParallelLoader(dataloader, [args.device]).per_device_loader(args.device)
 
@@ -804,10 +821,14 @@ class TGSumTrainer(Seq2SeqTrainer):
             ids_host = None
             preds_host = None
             labels_host = None
+            inputs_host = None
+
             # losses/preds/labels on CPU (final containers)
             all_losses = None
             all_preds = None
             all_labels = None
+            all_inputs = None
+
             # Will be useful when we have an iterable dataset so don't know its length.
 
             observed_num_examples = 0
@@ -824,6 +845,8 @@ class TGSumTrainer(Seq2SeqTrainer):
                 # Prediction step
                 loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only,
                                                             ignore_keys=ignore_keys)
+                inputs_decode = inputs["input_ids"] if args.include_inputs_for_metrics else None
+
                 if is_torch_tpu_available():
                     xm.mark_step()
 
@@ -831,13 +854,25 @@ class TGSumTrainer(Seq2SeqTrainer):
 
                 if 'doc_ids' in inputs.keys():
                     ids_host = inputs['doc_ids'] if ids_host is None else ids_host + inputs['doc_ids']
+
                 if loss is not None:
                     losses = self._nested_gather(loss.repeat(batch_size))
                     losses_host = losses if losses_host is None else torch.cat((losses_host, losses), dim=0)
+
                 if labels is not None:
                     labels = self._pad_across_processes(labels)
                     labels = self._nested_gather(labels)
                     labels_host = labels if labels_host is None else labels_host + labels
+
+                if inputs_decode is not None:
+                    inputs_decode = self._pad_across_processes(inputs_decode)
+                    inputs_decode = self._nested_gather(inputs_decode)
+                    inputs_host = (
+                        inputs_decode
+                        if inputs_host is None
+                        else nested_concat(inputs_host, inputs_decode, padding_index=-100)
+                    )
+
                 if logits is not None:
                     logits = self._pad_across_processes(logits)
                     logits = self._nested_gather(logits)
@@ -855,8 +890,15 @@ class TGSumTrainer(Seq2SeqTrainer):
                         logits = nested_numpify(preds_host)
                         all_preds = logits if all_preds is None else nested_concat(all_preds, logits,
                                                                                    padding_index=-100)
-                    if labels_host is not None:
+                    if inputs_host is not None:
+                        inputs_decode = nested_numpify(inputs_host)
+                        all_inputs = (
+                            inputs_decode
+                            if all_inputs is None
+                            else nested_concat(all_inputs, inputs_decode, padding_index=-100)
+                        )
 
+                    if labels_host is not None:
                         labels = nested_numpify(labels_host)
                         all_labels = (
                             labels if all_labels is None else nested_concat(all_labels, labels, padding_index=-100)
@@ -877,6 +919,13 @@ class TGSumTrainer(Seq2SeqTrainer):
             if preds_host is not None:
                 logits = nested_numpify(preds_host)
                 all_preds = logits if all_preds is None else nested_concat(all_preds, logits, padding_index=-100)
+
+            if inputs_host is not None:
+                inputs_decode = nested_numpify(inputs_host)
+                all_inputs = (
+                    inputs_decode if all_inputs is None else nested_concat(all_inputs, inputs_decode,
+                                                                           padding_index=-100)
+                )
             if labels_host is not None:
                 labels = nested_numpify(labels_host)
                 all_labels = labels if all_labels is None else nested_concat(all_labels, labels, padding_index=-100)
@@ -899,11 +948,17 @@ class TGSumTrainer(Seq2SeqTrainer):
                 all_preds = nested_truncate(all_preds, num_samples)
             if all_labels is not None:
                 all_labels = nested_truncate(all_labels, num_samples)
+            if all_inputs is not None:
+                all_inputs = nested_truncate(all_inputs, num_samples)
 
             # Metrics!
             if self.compute_metrics is not None and all_preds is not None and all_labels is not None:
+                # if args.include_inputs_for_metrics:
                 metrics = self.compute_metrics(
                     EvalPrediction(predictions=all_preds, label_ids=all_labels, doc_ids=ids_host))
+                # else:
+                #     metrics = self.compute_metrics(EvalPrediction(predictions=all_preds, label_ids=all_labels, doc_ids=ids_host))
+
             else:
                 metrics = {}
 

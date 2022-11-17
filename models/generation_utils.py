@@ -300,8 +300,10 @@ class GenerationMixin(GenerationMixin):
             **model_kwargs,
     ) -> Union[GreedySearchOutput, SampleOutput, BeamSearchOutput, BeamSampleOutput, torch.LongTensor]:
 
-        sent_boundaries = ((inputs[0] == 0).nonzero(as_tuple=True)[0], (inputs[0] == 2).nonzero(as_tuple=True)[0])
-
+        # sent_boundaries = ((inputs[0] == 0).nonzero(as_tuple=True)[0], (inputs[0] == 2).nonzero(as_tuple=True)[0])
+        start_ids = (inputs[0] == 0).nonzero(as_tuple=True)[0]
+        end_ids = torch.cat((start_ids[1:], torch.Tensor([inputs.shape[-1] - 2]).cuda()), dim=-1).int()
+        sent_boundaries = (start_ids, end_ids)
         # 1. Set generation parameters if not already defined
         bos_token_id = bos_token_id if bos_token_id is not None else self.config.bos_token_id
         num_beams = num_beams if num_beams is not None else self.config.num_beams
@@ -399,10 +401,10 @@ class GenerationMixin(GenerationMixin):
             )
 
         # 6. determine generation mode
-        num_beams = 5
+        num_beams = 2
         no_repeat_ngram_size = 3
         max_length = 256
-        min_length = 50
+        min_length = 80
         length_penalty = 1.0
         early_stopping = True
         is_beam_gen_mode = (num_beams > 1) and (num_beam_groups == 1) and do_sample is False and constraints is None
@@ -622,14 +624,13 @@ class GenerationMixin(GenerationMixin):
             vocab_size = next_token_scores.shape[-1]
             next_token_scores = next_token_scores.view(batch_size, num_beams * vocab_size)
 
-            next_token_scores, next_tokens = torch.topk(
-                next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True
-            )
+            next_token_scores, next_tokens = torch.topk(next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True)
 
             next_indices = torch_int_div(next_tokens, vocab_size)
             next_tokens = next_tokens % vocab_size
 
             # stateless
+
             beam_outputs = beam_scorer.process(
                 input_ids,
                 next_token_scores,
@@ -645,27 +646,38 @@ class GenerationMixin(GenerationMixin):
 
             nxt_token = beam_next_tokens.unsqueeze(-1)
             # mask_swch = (nxt_token == 50267)
-            mask_swch = (nxt_token == 50267)
+            input_ids = torch.cat([input_ids[beam_idx, :], nxt_token], dim=-1)
+            last_token = input_ids[:, -1]
+            mask_swch = (last_token == 50267)
+
             if mask_swch.sum() > 0:
-                # import pdb;pdb.set_trace()
                 # print(cur_len)
                 # EOS is detected in some indices
                 # should update 'reduced_encodings' keys of the detected indices
                 swch_indx = ((mask_swch.squeeze(-1) == True).nonzero(as_tuple=True)[0])
                 # nonSwth__indx = ((mask_swch.squeeze(-1) == False).nonzero(as_tuple=True)[0])
-                switch_partial_encodings = outputs.decoder_last_hidden_states[swch_indx, :, :]
+                # switch_partial_encodings = outputs.decoder_last_hidden_states[swch_indx, :, :]
                 input_ids_swch = input_ids[swch_indx, :]
 
                 switch_encoder_outputs = model_kwargs['encoder_outputs'][swch_indx, :, :]
                 # nonSwitch_encoder_outputs = model_kwargs['reduced_encodings'][nonSwth__indx, :, :]
 
-                combiner_mask = torch.zeros_like(input_ids_swch)
-                combiner_mask[combiner_mask!=1] = 1
-                # combiner_mask = torch.stack(combiner_mask_lst, dim=2).view(decoder_input_ids.shape[0], -1)
-                combiner_mask = combiner_mask[:, None, None, :].repeat(1, 1, switch_encoder_outputs.shape[1], 1)
+
+                encoder = self.get_encoder()
+                input_ids_swch_x = input_ids_swch
+                input_ids_swch_x[:, 0] = 0
+                input_ids_swch_x[input_ids_swch_x==50267] = 0
+                summary_attention_mask = torch.zeros_like(input_ids_swch_x).cuda()
+                summary_attention_mask[input_ids_swch_x!=1] = 1
+                global_attention_mask = torch.zeros_like(summary_attention_mask)
+                global_attention_mask[input_ids_swch_x==0] = 1
+                summary_encoder_outputs = encoder(input_ids=input_ids_swch_x, attention_mask=summary_attention_mask, global_attention_mask=global_attention_mask)
+                combiner_mask = summary_attention_mask
+                combiner_mask = combiner_mask[:, None, None, :].repeat(1, 1, model_kwargs['encoder_outputs'].shape[1], 1)
+
                 # updating reduced_encodings of the changed indices...
                 combiner = self.get_combiner()
-                encoder_outputs_x, cross_attn_weights_word, cross_attn_present_key_value_word = combiner(hidden_states=switch_encoder_outputs, key_value_states=switch_partial_encodings, attention_mask=combiner_mask)
+                encoder_outputs_x, cross_attn_weights_word, cross_attn_present_key_value_word = combiner(hidden_states=switch_encoder_outputs, key_value_states=summary_encoder_outputs[0], attention_mask=combiner_mask)
                 extractor = self.get_extractor()
                 updated_rows_reduced_encodings, updated_rows_reduced_encodings_mask, updated_rows_sent_scores = extractor(encoder_outputs_x, sent_boundaries, LIMIT=1024)
 
@@ -693,8 +705,6 @@ class GenerationMixin(GenerationMixin):
                     model_kwargs['reduced_encodings_mask'][indx_updated] = updated_rows_reduced_encodings_mask[cid]
                     cid += 1
 
-
-            input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
 
 
             # mask_swch_row, mask_swch_col = torch.where(input_ids)

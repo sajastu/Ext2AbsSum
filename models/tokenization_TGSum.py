@@ -102,6 +102,8 @@ class BatchEncoding(BatchEncoding):
 
         for key, value in self.items():
             if key == 'doc_ids':
+                # if 'SP:400f24337c27f8f1fbb40ba7dd6c2a7c92b7a32f--main' in value:
+                #     import pdb;pdb.set_trace()
                 tensor = value
                 self[key] = tensor
                 continue
@@ -137,6 +139,7 @@ class BatchEncoding(BatchEncoding):
                     batch_labels = []
                     for v in batch_values:
                         try:
+                            # import pdb;pdb.set_trace()
                             batch_labels.append(as_tensor(v))
                         except:
                             import pdb;
@@ -849,7 +852,8 @@ class TGSumTokenizer(LEDTokenizer):
                         if len(sent.strip()) > 0:
                             first_id = get_input_ids(sent)
                             if len(first_id) > 1 and len(first_id) < 400:
-                                first_ids += first_id + [2, 0]
+                                # first_ids += first_id + [2, 0]
+                                first_ids += first_id + [0]
                                 # valid_sents_idx.append(jsent)
 
                                 # try:
@@ -869,9 +873,6 @@ class TGSumTokenizer(LEDTokenizer):
                             # for val_sent_id in invalid_sents_idx:
                             tmp_lst = [s for js, s in enumerate(sum_sents_labels[idx][sect_idx][sum_idx][sum_sent_idx]) if js not in invalid_sents_idx]
                             sum_sents_labels[idx][sect_idx][sum_idx][sum_sent_idx] = tmp_lst
-
-                            # del sum_sents_labels[idx][sect_idx][sum_idx][0][7]
-
 
                     str_sents_instance.append(str_sents_sects)
                     new_ext_labels.append(new_ext_label_section.copy())

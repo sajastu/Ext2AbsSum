@@ -281,7 +281,7 @@ class DataTrainingArguments:
         },
     )
     max_eval_samples: Optional[int] = field(
-        default=10,
+        default=None,
         metadata={
             "help": (
                 "For debugging purposes or quicker training, truncate the number of evaluation examples to this "
@@ -620,7 +620,7 @@ def main():
             f"`{model.__class__.__name__}`. This will lead to loss being calculated twice and will take up more memory"
         )
 
-    def preprocess_function(examples):
+    def preprocess_function_train(examples):
         # remove pairs where at least one record is None
         inputs, targets, src_ids, tgt_ids, topic_info_global, topic_info_section, ext_labels, section_scores, \
         headings, inputs_tokenized, target_tokenized, sum_sents_labels =[], [], [], [], [], [], [], [], [], [], [], []
@@ -630,7 +630,127 @@ def main():
         #
         #
         #
+        # ( number_of_summaries, number_of_summary_sentences, number of source sentences[0,1] )
+        for i in range(len(examples[text_column])):
+            if examples[text_column][i] is not None and examples[summary_column][i] is not None:
+                input_sents = []
+                num_sents = 0
+                input_sents_tokenized = []
+                section_heading = []
+                for sect in examples[text_column][i]:
+                    sent_sects = []
+                    for sent in sect:
+                        sent_sects.append(sent.replace(' </s>', '').replace(' <s>', '').replace(' <mask>', '') \
+                              .replace('<s>', '').replace('</s>', '').replace('<mask>', '') \
+                              .replace('\n', ' ').strip().lower())
+                    num_sents += len(sent_sects)
+                    input_sents.append(' <SENTTT> '.join(sent_sects.copy()))
 
+                for sect in examples[text_column + '_tokenized'][i]:
+                    sent_sects = []
+                    for sent in sect:
+                        sent_sects.append(sent)
+
+                    input_sents_tokenized.append(sent_sects.copy())
+
+                section_heading.append([e.split(' <COMBINED> ') for e in examples['section_headings'][i]])
+                headings.append(section_heading)
+                inputs.append(input_sents)
+
+
+                ####################
+                ####################
+                ####################
+                ### sample ext labels ...
+                ## num_of_sects, num_of_summaries, num_of_summary_sentences, 0,1 labels
+
+                # for jsect, sect in enumerate(examples['ext_labels'][i]):
+                #     sum_sents_labels_signle_1 = []
+                #     for jsum, sum in enumerate(examples[summary_column][i]):
+                #         sum_sents_labels_signle = []
+                #         for _ in sum:
+                #             sum_sents_labels_signle.append(examples["ext_labels"][i][jsect][jsum])
+                #         sum_sents_labels_signle_1.append(sum_sents_labels_signle)
+                #     sum_sents_labels.append(sum_sents_labels_signle_1)
+
+                # examples['sum_sent_labels'][i] = sum_sents_labels
+                # sum_sents_labels_all.append(sum_sents_labels)
+                sum_sents_labels_all.append(examples["ext_labels_summ_sents"][i])
+
+                ####################
+                ####################
+                ####################
+
+                inputs_tokenized.append(input_sents_tokenized)
+                src_ids.append(examples["paper_id"][i])
+                # import pdb;pdb.set_trace()
+                # if examples['paper_id'][i] == 'SP:27976b4bfb6844ad0a4750ebc1a5e8cbdcfcbe72--1':
+                #     import pdb;pdb.set_trace()
+
+                # if examples['paper_id'][i] == 'SP:27976b4bfb6844ad0a4750ebc1a5e8cbdcfcbe72':
+                #     import pdb;pdb.set_trace()
+
+
+                ext_labels.append(examples["ext_labels"][i])
+                valid_targets = [j for j, e in enumerate(examples[summary_column][i])]
+
+                targets.extend([e for j, e in enumerate(examples[summary_column][i]) if j in valid_targets])
+                # target_tokenized.append([e.strip().lower() for j, e in enumerate(examples[summary_column][i]) if j in valid_targets])
+                tgt_ids.extend(len(valid_targets) * [examples["paper_id"][i]])
+
+        model_inputs = abs_tokenizer(
+            inputs,
+            # inputs_tokenized=inputs_tokenized,
+            # target_tokenized=target_tokenized,
+            topic_file_path=data_args.topic_file_path,
+            max_length=data_args.max_source_length,
+            padding=padding,
+            truncation=True,
+            doc_ids=src_ids,
+            section_headings=headings,
+            ext_labels=ext_labels,
+            sum_sents_labels=sum_sents_labels_all,
+            section_scores=section_scores,
+            labeling=model_args.labeling,
+         )
+
+        # Setup the tokenizer for targets
+        with abs_tokenizer.as_target_tokenizer():
+            labels = abs_tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True, doc_ids=['tgt-'+t for t in tgt_ids],is_target=True)
+
+
+        # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
+        # padding in the loss.
+        if padding == "max_length" and data_args.ignore_pad_token_for_loss:
+            labels["input_ids"] = [
+                [(l if l != abs_tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+            ]
+        model_inputs["attention_mask"] = model_inputs.attention_mask
+
+        # create 0 global_attention_mask lists
+        model_inputs["global_attention_mask"] = []
+
+        for att_mask in model_inputs["attention_mask"]:
+            model_inputs["global_attention_mask"].append([0] * len(att_mask))
+
+
+        # since above lists are references, the following line changes the 0 index for all samples
+        model_inputs["global_attention_mask"][0][0] = 1
+        # import pdb;pdb.set_trace()
+        model_inputs = _combine_model_inputs(model_inputs, labels, tgt_ids, targets, is_train=True)
+        # model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+    def preprocess_function_val(examples):
+        # remove pairs where at least one record is None
+        inputs, targets, src_ids, tgt_ids, topic_info_global, topic_info_section, ext_labels, section_scores, \
+        headings, inputs_tokenized, target_tokenized, sum_sents_labels =[], [], [], [], [], [], [], [], [], [], [], []
+        sum_sents_labels_all = []
+        # Retrieving labels for writing each summary sentence...
+        # examples['sum_sent_labels'][i] = [ [ [sent_1_labels], [sent_2_labels], [...], [] ], [] ]
+        #
+        #
+        #
         # ( number_of_summaries, number_of_summary_sentences, number of source sentences[0,1] )
         for i in range(len(examples[text_column])):
             if examples[text_column][i] is not None and examples[summary_column][i] is not None:
@@ -732,35 +852,9 @@ def main():
         # since above lists are references, the following line changes the 0 index for all samples
         model_inputs["global_attention_mask"][0][0] = 1
 
-        model_inputs = _combine_model_inputs(model_inputs, labels, tgt_ids, targets)
+        model_inputs = _combine_model_inputs(model_inputs, labels, tgt_ids, targets, is_train=False)
         # model_inputs["labels"] = labels["input_ids"]
         return model_inputs
-
-    # def preprocess_function(examples):
-    #     # remove pairs where at least one record is None
-    #     inputs, targets = [], []
-    #     import pdb;pdb.set_trace()
-    #     for i in range(len(examples[text_column])):
-    #         if examples[text_column][i] and examples[summary_column][i]:
-    #             inputs.append(' '.join(sum(examples[text_column][i], [])))
-    #             targets.append(examples[summary_column][i][0])
-    #
-    #     inputs = [prefix + inp for inp in inputs]
-    #     model_inputs = abs_tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
-    #
-    #     # Setup the tokenizer for targets
-    #     with abs_tokenizer.as_target_tokenizer():
-    #         labels = abs_tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True)
-    #
-    #     # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
-    #     # padding in the loss.
-    #     if padding == "max_length" and data_args.ignore_pad_token_for_loss:
-    #         labels["input_ids"] = [
-    #             [(l if l != abs_tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
-    #         ]
-    #
-    #     model_inputs["labels"] = labels["input_ids"]
-    #     return model_inputs
 
     if training_args.do_train:
         if "train" not in raw_datasets:
@@ -770,9 +864,75 @@ def main():
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
 
+        def group_summaries(examples, columns):
+            # import pdb;
+            # pdb.set_trace()
+
+            examples_tmp = examples.copy()
+            examples_tmp.clear()
+            for col in columns:
+                examples_tmp[col] = []
+
+            for jpid, paper_id in enumerate(examples['paper_id']):
+                sum_sent_labels = examples['ext_labels_summ_sents'][jpid]
+                labels = examples['summary'][jpid]
+
+                num_summaries = len(sum_sent_labels[0])
+                # model_inputs['doc_ids'][jpid]
+                N_SUM = 2
+                # import pdb;pdb.set_trace()
+                if num_summaries > N_SUM:
+                    # split...
+                    start_idx = 0
+                    # import pdb;pdb.set_trace()
+                    while start_idx < num_summaries :
+                        end_idx = start_idx + N_SUM
+
+                        if end_idx > num_summaries - 1:
+                            end_idx = num_summaries - 1
+
+                        concat_id = int(start_idx / N_SUM)
+
+                        if end_idx > num_summaries:
+                            end_idx = num_summaries
+                            concat_id = int(start_idx / N_SUM)
+
+                        if start_idx != end_idx:
+                            new_sum_sent_labels = [s[start_idx:end_idx] for s in sum_sent_labels]
+                            new_labels = labels[start_idx:end_idx]
+                            # if model_inputs['doc_ids'][jpid] == 'SP:0cf756ba6b172f9b29e84945c093dfd89ae62803':
+                            #     import pdb;pdb.set_trace()
+                            for key in columns:
+                                if key == 'paper_id':
+                                    examples_tmp[key].append(examples[key][jpid] + f'--{concat_id}')
+                                elif key == 'ext_labels_summ_sents':
+                                    examples_tmp[key].append(new_sum_sent_labels)
+                                elif key == 'summary':
+                                    examples_tmp[key].append(new_labels)
+                                else:
+                                    examples_tmp[key].append(examples[key][jpid])
+                        start_idx += N_SUM
+                else:
+                    # normal
+                    # if model_inputs['doc_ids'][jpid] == 'SP:0cf756ba6b172f9b29e84945c093dfd89ae62803':
+                    #     import pdb;pdb.set_trace()
+                    for key in columns:
+
+                        # if examples[key][jpid]=='SP:400f24337c27f8f1fbb40ba7dd6c2a7c92b7a32f':
+                            # import pdb;pdb.set_trace()
+
+                        if key == 'paper_id':
+                            examples_tmp[key].append(examples[key][jpid] + f'--main')
+                        else:
+                            examples_tmp[key].append(examples[key][jpid])
+
+            return examples_tmp
+
+        train_dataset = train_dataset.map(lambda x: group_summaries(x, train_dataset.features.keys()), batched=True)
+        # import pdb;pdb.set_trace()
         with training_args.main_process_first(desc="train dataset map pre-processing"):
             train_dataset = train_dataset.map(
-                preprocess_function,
+                preprocess_function_train,
                 batched=True,
                 num_proc=data_args.preprocessing_num_workers,
                 remove_columns=column_names,
@@ -785,8 +945,6 @@ def main():
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = raw_datasets["validation"]
-
-
         if data_args.max_eval_samples is not None:
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
@@ -796,7 +954,7 @@ def main():
 
         with training_args.main_process_first(desc="validation dataset map pre-processing"):
             eval_dataset = eval_dataset.map(
-                preprocess_function,
+                preprocess_function_val,
                 batched=True,
                 num_proc=data_args.preprocessing_num_workers,
                 remove_columns=column_names,
