@@ -662,11 +662,10 @@ class GenerationMixin(GenerationMixin):
                 switch_encoder_outputs = model_kwargs['encoder_outputs'][swch_indx, :, :]
                 # nonSwitch_encoder_outputs = model_kwargs['reduced_encodings'][nonSwth__indx, :, :]
 
-
                 encoder = self.get_encoder()
                 input_ids_swch_x = input_ids_swch
                 input_ids_swch_x[:, 0] = 0
-                input_ids_swch_x[input_ids_swch_x==50267] = 0
+                input_ids_swch_x[input_ids_swch_x==50267] = 2
                 summary_attention_mask = torch.zeros_like(input_ids_swch_x).cuda()
                 summary_attention_mask[input_ids_swch_x!=1] = 1
                 global_attention_mask = torch.zeros_like(summary_attention_mask)
@@ -679,7 +678,7 @@ class GenerationMixin(GenerationMixin):
                 combiner = self.get_combiner()
                 encoder_outputs_x, cross_attn_weights_word, cross_attn_present_key_value_word = combiner(hidden_states=switch_encoder_outputs, key_value_states=summary_encoder_outputs[0], attention_mask=combiner_mask)
                 extractor = self.get_extractor()
-                updated_rows_reduced_encodings, updated_rows_reduced_encodings_mask, updated_rows_sent_scores = extractor(encoder_outputs_x, sent_boundaries, LIMIT=1024)
+                updated_rows_reduced_encodings, updated_rows_reduced_encodings_mask, updated_rows_sent_scores = extractor(encoder_outputs_x, switch_encoder_outputs, sent_boundaries, LIMIT=1024)
 
                 bs_old, seq_len_old, dim = model_kwargs['reduced_encodings'].shape
                 bs_updated, seq_len_updated, _ = updated_rows_reduced_encodings.shape

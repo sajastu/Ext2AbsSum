@@ -725,6 +725,12 @@ class TGSumModel(LEDModel):
 
         if encoder_outputs is None:
 
+            # input_ids = input_ids[input_ids != 50266]
+            # input_ids = input_ids[input_ids != 50267]
+
+            # s1 = ((input_ids[0] == 50266).nonzero(as_tuple=True)[0])
+            # s2 = ((input_ids[0] == 50267).nonzero(as_tuple=True)[0])
+            # input_ids[input_ids[s1]]
             global_attention_mask = torch.zeros_like(attention_mask).cuda()
             global_attention_mask[0, ((input_ids[0] == 0).nonzero(as_tuple=True)[0])] = 1
             encoder_outputs = self.encoder(
@@ -816,12 +822,16 @@ class TGSumModel(LEDModel):
                 decoder_input_ids_iteration = decoder_input_ids[:, iteration, :][:, :]
                 decoder_input_ids_mask = labels_mask[:, iteration, :][:, :]
                 if iteration != 0:
-                    if iteration == 1:
-                        decoder_input_x = decoder_input_ids[:, iteration - 1, 1:].view(decoder_input_ids.shape[0], -1)
-                        decoder_input_mask_x = labels_mask[:, iteration - 1, 1:].view(decoder_input_ids.shape[0], -1)
-                    else:
-                        decoder_input_x = decoder_input_ids[:, :iteration, :].view(decoder_input_ids.shape[0], -1)
-                        decoder_input_mask_x = labels_mask[:, :iteration, :].view(decoder_input_ids.shape[0], -1)
+                    # if iteration == 1:
+                    #     decoder_input_x = decoder_input_ids[:, iteration - 1, 1:].view(decoder_input_ids.shape[0], -1)
+                    #     decoder_input_mask_x = labels_mask[:, iteration - 1, 1:].view(decoder_input_ids.shape[0], -1)
+                    # else:
+
+                    decoder_input_x = decoder_input_ids[:, :iteration, :].view(decoder_input_ids.shape[0], -1).clone()
+                    decoder_input_x = decoder_input_x[:, 1:]
+                    decoder_input_x[decoder_input_x == 50267] = 2
+                    decoder_input_mask_x = labels_mask[:, :iteration, :].view(decoder_input_ids.shape[0], -1)[:, 1:]
+                    # decoder_input_mask_x = labels_mask[:, :iteration, :].view(decoder_input_ids.shape[0], -1)
 
                     global_attention_mask_x = torch.zeros_like(decoder_input_mask_x).cuda()
                     for b_idx in range(global_attention_mask_x.shape[0]):
@@ -850,7 +860,7 @@ class TGSumModel(LEDModel):
                     end_ids = torch.cat((start_ids[1:], torch.Tensor([input_ids.shape[-1] - 2]).cuda()), dim=-1).int()
                     # remove the head
 
-                    reduced_encodings, reduced_encodings_mask, sent_scores = self.extractor(encoder_outputs_x, (start_ids, end_ids),  LIMIT=1024)
+                    reduced_encodings, reduced_encodings_mask, sent_scores = self.extractor(encoder_outputs_x, encoder_outputs[0].clone(), (start_ids, end_ids),  LIMIT=1024)
 
                 else:
                     if decoder_input_ids.shape[1] == 1:
@@ -964,10 +974,9 @@ class TGSumModel(LEDModel):
             encoder_global_attentions=encoder_outputs.global_attentions,
         )
 
-    def extractor(self, encoder_outputs, sent_boundaries, LIMIT=1024):
+    def extractor(self, encoder_outputs, encoder_outputs_origin, sent_boundaries, LIMIT=1024):
         sent_real_ids, end_pre_ids = sent_boundaries
-
-
+        encoder_outputs_origin = encoder_outputs_origin.expand_as(encoder_outputs)
         sent_repr = self.get_repr_from_index(encoder_outputs, index=sent_real_ids)
         # section_repr = self.get_repr_from_index(encoder_outputs[0], index=((input_ids[0] == input_ids[0][0]).nonzero(as_tuple=True)[0]))
         sent_scores = self.Sigmoid(self.sent_scorer(sent_repr))
@@ -976,15 +985,14 @@ class TGSumModel(LEDModel):
         # )
         sent_len = ((end_pre_ids - sent_real_ids) )[None, :]
         top_sents_ids = torch.argsort(sent_scores, descending=True, dim=1).squeeze(-1)
-
         reduced_encoding_list = []
         max_len = -100
-        for sum_idx in range(encoder_outputs.shape[0]):
+        for sum_idx in range(encoder_outputs_origin.shape[0]):
             top_sents_len_i = torch.index_select(sent_len, 1, top_sents_ids[sum_idx])
             top_sents_included_i = (~(torch.cumsum(top_sents_len_i, dim=-1) > LIMIT)).sum()
             top_sents_ids_i = top_sents_ids[sum_idx, :top_sents_included_i].unsqueeze(0)
             sent_len_i = torch.index_select(sent_len, 1, top_sents_ids_i.sort(dim=1)[0].squeeze(0))
-            masked_top_sents_input = torch.zeros((1, encoder_outputs.shape[1])).cuda()
+            masked_top_sents_input = torch.zeros((1, encoder_outputs_origin.shape[1])).cuda()
             num_of_masked = 0
             selected_sent_embeddings = []
             top_sents_start_ids_id = sent_real_ids[top_sents_ids_i.sort(dim=1)[0]]
@@ -992,7 +1000,7 @@ class TGSumModel(LEDModel):
             for start_idx, end_idx in zip(top_sents_start_ids_id[0], top_sens_end_ids_i[0]):
                 masked_top_sents_input[0, start_idx:end_idx] = 1
                 num_of_masked += len(masked_top_sents_input[0, start_idx:end_idx])
-                selected_sent_embeddings.append(encoder_outputs[sum_idx, start_idx])
+                selected_sent_embeddings.append(encoder_outputs_origin[sum_idx, start_idx])
 
             if num_of_masked > max_len:
                 max_len = num_of_masked
@@ -1000,8 +1008,8 @@ class TGSumModel(LEDModel):
             # selected_sent_embeddings = torch.stack(selected_sent_embeddings, dim=0)
             # selected_sent_embeddings = selected_sent_embeddings.unsqueeze(0)
             # torch.where(masked_top_sents_input > -1, input_ids,)
-            mask = masked_top_sents_input.unsqueeze(-1).expand_as(encoder_outputs[sum_idx].unsqueeze(0)).bool()
-            reduced_encodings_i = torch.masked_select(encoder_outputs[sum_idx], mask).view(1, num_of_masked, -1)
+            mask = masked_top_sents_input.unsqueeze(-1).expand_as(encoder_outputs_origin[sum_idx].unsqueeze(0)).bool()
+            reduced_encodings_i = torch.masked_select(encoder_outputs_origin[sum_idx], mask).view(1, num_of_masked, -1)
             reduced_encoding_list.append(reduced_encodings_i)
 
         # from torch.nn.utils.rnn import pad_sequence

@@ -1,4 +1,3 @@
-
 import itertools
 import math
 from typing import Optional, Union, List, Dict, Any, Sequence, Tuple
@@ -51,7 +50,6 @@ class BatchEncoding(BatchEncoding):
     ):
         """
         Convert the inner content to tensors.
-
         Args:
             tensor_type (`str` or [`~file_utils.TensorType`], *optional*):
                 The type of tensors to use. If `str`, should be one of the values of the enum
@@ -852,8 +850,8 @@ class TGSumTokenizer(LEDTokenizer):
                         if len(sent.strip()) > 0:
                             first_id = get_input_ids(sent)
                             if len(first_id) > 1 and len(first_id) < 400:
-                                # first_ids += first_id + [2, 0]
-                                first_ids += first_id + [0]
+                                first_ids += first_id + [2, 0]
+                                # first_ids += first_id + [0]
                                 # valid_sents_idx.append(jsent)
 
                                 # try:
@@ -1009,7 +1007,6 @@ class TGSumTokenizer(LEDTokenizer):
         Prepares a sequence of input id, or a pair of sequences of inputs ids so that it can be used by the model. It
         adds special tokens, truncates sequences if overflowing while taking into account the special tokens and
         manages a moving window (with user defined stride) for overflowing tokens
-
         Args:
             batch_ids_pairs: list of tokenized input ids or input ids pairs
         """
@@ -1184,19 +1181,16 @@ class TGSumTokenizer(LEDTokenizer):
     ) -> dict:
         """
         Pad encoded inputs (on left/right and up to predefined length or max length in the batch)
-
         Args:
             encoded_inputs:
                 Dictionary of tokenized inputs (`List[int]`) or batch of tokenized inputs (`List[List[int]]`).
             max_length: maximum length of the returned list and optionally padding length (see below).
                 Will truncate by taking into account the special tokens.
             padding_strategy: PaddingStrategy to use for padding.
-
                 - PaddingStrategy.LONGEST Pad to the longest sequence in the batch
                 - PaddingStrategy.MAX_LENGTH: Pad to the max length (default)
                 - PaddingStrategy.DO_NOT_PAD: Do not pad
                 The tokenizer padding sides are defined in self.padding_side:
-
                     - 'left': pads on the left of the sequences
                     - 'right': pads on the right of the sequences
             pad_to_multiple_of: (optional) Integer if set will pad the sequence to a multiple of the provided value.
@@ -1274,5 +1268,3 @@ class TGSumTokenizer(LEDTokenizer):
                     raise ValueError("Invalid padding strategy:" + str(self.padding_side))
 
         return encoded_inputs
-
-

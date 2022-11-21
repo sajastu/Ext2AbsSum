@@ -16,13 +16,13 @@ export HF_DATASETS_CACHE=/disk0/$USER/.cache/huggingface2/
 #export VAL_STEPS=9530
 
 export MAX_SRC=4096
-#export VAL_STEPS=8400
 export VAL_STEPS=9530
+#export VAL_STEPS=10
 
 
 #SP:400f24337c27f8f1fbb40ba7dd6c2a7c92b7a32f
 #python -m torch.distributed.launch --nproc_per_node=2 run_summarization.py \
-CUDA_VISIBLE_DEVICES=1 python run_summarization.py \
+CUDA_VISIBLE_DEVICES=0 python run_summarization.py \
     --model_name_or_path $MODEL_NAME \
     --tokenizer_name $MODEL_NAME \
     --ext_tokenizer_name roberta-large \

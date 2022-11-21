@@ -430,7 +430,7 @@ class TGSumTrainer(Seq2SeqTrainer):
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
 
-                    self._maybe_log_save_evaluate(tr_loss, topic_tr_loss, lm_tr_loss, sect_loss, sent_loss, model, trial, epoch, ignore_keys_for_eval)
+                    self._maybe_log_save_evaluate(tr_loss, topic_tr_loss, lm_tr_loss, sect_loss, sent_loss, model, trial, epoch, ignore_keys_for_eval, step)
                 else:
                     self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
@@ -484,7 +484,7 @@ class TGSumTrainer(Seq2SeqTrainer):
 
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
-    def _maybe_log_save_evaluate(self, tr_loss, topic_tr_loss, lm_tr_loss, sect_loss, sent_loss, model, trial, epoch, ignore_keys_for_eval):
+    def _maybe_log_save_evaluate(self, tr_loss, topic_tr_loss, lm_tr_loss, sect_loss, sent_loss, model, trial, epoch, ignore_keys_for_eval, step=None):
         if self.control.should_log:
             if is_torch_tpu_available():
                 xm.mark_step()
@@ -537,7 +537,7 @@ class TGSumTrainer(Seq2SeqTrainer):
             self._save_checkpoint(model, trial, metrics=metrics)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
-        if self.control.should_evaluate:
+        if self.control.should_evaluate or (step is not None and step==2000):
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
             self._report_to_hp_search(trial, epoch, metrics)
 
